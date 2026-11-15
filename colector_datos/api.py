@@ -35,6 +35,14 @@ existe GDS de respaldo), y el resto de parámetros de las capas de Mars Trek
 servicio de temperatura puntual). Presupuesto marciano: 2 llamadas de
 catálogo + 1 tile DTM (+2 por capa si con_teselas=True). Sitios sin tiles
 controlados (p.ej. Gale) quedan en catálogos con nota_elevacion.
+
+En la TIERRA (rama `tierra-datos-crudos`) el MISMO formato de datos crudos
+sale de: Copernicus DEM GLO-30 (tile 1°x1° de AWS público, sin auth,
+determinista — 0 llamadas de catálogo), NASA POWER (térmico, 2 peticiones
+~2 s), Sentinel-2 L2A (superficie, STAC Earth Search + window reads COG) e
+iluminación local (0 llamadas). Presupuesto terrestre frío: ~1 tile de
+30-50 MB (cacheado) + 4 ventanas S2 (~13 s cada una, cacheadas como .npz)
++ 2 peticiones POWER; tibio ~3-5 s.
 """
 
 from __future__ import annotations
@@ -46,10 +54,14 @@ from . import (
     analogos_tierra,
     constantes,
     iluminacion,
+    iluminacion_tierra,
     superficie,
+    superficie_tierra,
     termico,
+    termico_tierra,
     topografia,
     topografia_dtm,
+    topografia_tierra,
     utilidades,
 )
 
@@ -586,13 +598,94 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             capas_trek, None, cuerpo="mars")
 
     # ==================================================================
-    # TIERRA: se delega todo al módulo de análogos, pero con la MISMA
-    # envoltura (metadatos + registro) que el resto de los cuerpos.
+    # TIERRA: con la misma envoltura (metadatos + registro) y AHORA con
+    # datos crudos en el MISMO formato que la Luna/Marte (rama
+    # `tierra-datos-crudos`): topografía GLO-30, térmico POWER,
+    # superficie Sentinel-2, iluminación local. Se lanza en paralelo un
+    # pool de 3 (topografía | térmico | superficie); la iluminación es
+    # local (0 llamadas) y `analogos_tierra` conserva el catálogo CMR/
+    # GIBS como punteros opcionales.
     # ==================================================================
     else:  # earth
-        _aviso(aviso, "Análogos Tierra (catálogo CMR + GIBS + Copernicus)...")
-        resultado["analogos_tierra"] = analogos_tierra.datos_tierra(
-            lat, lon, radio)
+        from concurrent.futures import ThreadPoolExecutor
+
+        _aviso(aviso, "En paralelo: DTM GLO-30 + POWER (térmico) + "
+               "Sentinel-2 (superficie)... (tibio: segundos)")
+        pool = ThreadPoolExecutor(3)
+        futuros_t = {
+            "topo": pool.submit(topografia_tierra.analizar_sitio,
+                                lat, lon, radio),
+            "term": pool.submit(termico_tierra.datos_termico_tierra,
+                                lat, lon),
+            "sup": pool.submit(superficie_tierra.datos_superficie_tierra,
+                               lat, lon, radio),
+        }
+        res_topo = futuros_t["topo"].result()
+        res_term = futuros_t["term"].result()
+        res_sup = futuros_t["sup"].result()
+        pool.shutdown()
+
+        # --- topografía: misma estructura que la vía DTM lunar/marciana ---
+        if "error" in res_topo:
+            resultado["topografia"] = {
+                "fuente": res_topo.get("fuente", "Copernicus GLO-30"),
+                "via": "catalogos",
+                "error": res_topo["error"],
+                "nota_elevacion": (
+                    "no se pudo leer el tile GLO-30 (¿sitio en mar abierto "
+                    "o red?): los catálogos CMR de abajo indican qué "
+                    "colecciones cubren la caja"),
+            }
+        else:
+            topo: dict[str, Any] = {
+                "fuente": "Copernicus DEM GLO-30 (AWS público) vía rasterio",
+                "via": "glo30",
+                "elevacion_m": res_topo["elevacion"],
+                "pendiente": res_topo["pendiente"],
+                "rugosidad": res_topo["rugosidad"],
+                "metodo_pendiente_rugosidad": (
+                    "gradiente sobre la malla del DEM "
+                    f"(~{res_topo.get('resolucion_m')} m/píxel); rugosidad = "
+                    "desviación típica dentro de celdas de ~100 m (MISMA "
+                    "definición que la vía lunar/marciana)"),
+                "crateres_formaciones": res_topo.get("crateres") or {},
+                "dtm_detalle": {
+                    "tile": res_topo.get("tile"),
+                    "resolucion_m": res_topo.get("resolucion_m"),
+                    "datum_elevacion": res_topo.get("datum_elevacion"),
+                    "cobertura_fraccion": res_topo.get("cobertura_fraccion"),
+                    "pixeles_validos_fraccion": res_topo.get(
+                        "pixeles_validos_fraccion"),
+                    "tile_en_cache": res_topo.get("de_cache"),
+                    "tiempos_s": {k: res_topo.get(k) for k in
+                                  ("stac_s", "descarga_s", "computo_s",
+                                   "total_s")},
+                },
+            }
+            if res_topo.get("nota_oceano"):
+                topo["nota_oceano"] = res_topo["nota_oceano"]
+            resultado["topografia"] = topo
+
+        # --- térmico / superficie / iluminación: los módulos ya devuelven
+        #     las claves estándar, van casi tal cual ------------------------
+        resultado["termico"] = {k: v for k, v in res_term.items()
+                                if not k.startswith("_")}
+        resultado["superficie"] = res_sup
+        resultado["iluminacion"] = iluminacion_tierra.datos_iluminacion_tierra(
+            lat, lon)
+
+        resultado["metadatos"]["fuentes"].extend([
+            "Copernicus GLO-30 (topografía)",
+            "NASA POWER (térmico)",
+            "Sentinel-2 Earth Search (superficie)",
+            "geometría solar local (iluminación)",
+        ])
+        # Catálogo CMR/GIBS opcional (punteros + teselas para el visor):
+        # no es dato crudo, es el "dónde pedir más".
+        if incluir_tierra:
+            _aviso(aviso, "Análogos Tierra (catálogo CMR + GIBS)...")
+            resultado["analogos_tierra"] = analogos_tierra.datos_tierra(
+                lat, lon, max(radio, 0.5))
         resultado["metadatos"]["fuentes"].append(
             "CMR/GIBS/Copernicus (análogos Tierra)")
         try:
