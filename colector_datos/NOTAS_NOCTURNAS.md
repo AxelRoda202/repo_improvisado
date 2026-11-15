@@ -143,7 +143,81 @@ GDS entregó, así que cada cifra coincide exactamente.
 
 ## 3. Fase A experimental (DTM con rasterio)
 
-- PENDIENTE (rama `dtm-rasterio`)
+**Rama:** `dtm-rasterio` (creada desde `optimizacion-gds`). Módulos nuevos:
+`colector_datos/topografia_dtm.py` (el piloto) y
+`colector_datos/prueba_dtm.py` (la corrida de medición/comparación).
+Dependencia nueva: `rasterio` 1.5.2 (instalada con pip, wheel cp313 win).
+
+### 3.1 Cómo funciona el piloto
+
+1. **STAC** (1 POST, ~3 s): busca el tile Kaguya TC DEM (`*-DEM.tif`) que
+   cubre la caja; los items de LOLA apuntan a nubes `.copc.laz` de 169 MB
+   y se descartan.
+2. **Descarga** (1 GET, tile ~7 MB en S3 estático): se guarda en
+   `data/cache/dtm/` y se reutiliza (datos históricos, como la caché GDS).
+3. **Window read + cómputo** (~0.3 s): solo se lee el trozo del raster que
+   cubre la caja; pendiente por gradiente con distancia real en metros;
+   rugosidad = std dentro de celdas de ~100 m (MISMA definición que la vía
+   GDS → comparable de frente).
+
+Hallazgos de implementación (por si se integra mañana):
+- Los tiles usan CRS IAU de la LUNA (p.ej. "Equirectangular, clon = 180").
+  NO se puede usar `EPSG:4326` como origen (¡es la Tierra!) — PROJ lo
+  rechaza. La CRS de origen correcta es `IAU_2015:30100` (geográfica
+  lunar), que el PROJ de rasterio resuelve bien. Queda además un respaldo
+  manual con la fórmula equirectangular.
+- Resolución real del tile: **26.7 m/píxel** (no los 10 m nominales).
+- Fallback previsto: si no hay tile tif que cubra la caja (o falla todo),
+  el dict devuelve `fallback="lolardr"` y la integración usaría la vía
+  GDS de siempre.
+
+### 3.2 Resultados — Mare Smythii (luna -23.4, 157.8, ±0.05°), tile EN CACHÉ
+
+- **Tiempos: STAC 3.3 s + descarga 0.0 s + cómputo 0.3 s = 3.6 s TOTAL.**
+- Cobertura del tile: 100 % · 12.978 píxeles útiles (vs 790 puntos LOLA).
+- Elevación: min -2435.8 · media -2325.34 · mediana -2309.76 · max
+  -2267.1 · std 42.6 m.
+- Pendiente: media 3.731° · mediana 3.279° · max 16.673°.
+- Rugosidad (celdas de 107 m): media 1.932 m · mediana 1.696 m · max 8.77 m.
+
+### 3.3 Comparación de calidad vs la vía GDS (LOLA, mismo sitio)
+
+| Métrica | DTM (Kaguya 26.7 m) | LOLA (GDS) | Δabs | Δrel |
+|---|---|---|---|---|
+| Elevación media (m) | -2325.340 | -2336.779 | 11.4 | **0.5 %** |
+| Pendiente media (°) | 3.731 | 2.246 | 1.49 | 66 % |
+| Rugosidad media (m) | 1.932 | 3.227 | 1.30 | 40 % |
+
+Lectura honesta:
+- **Elevación: acuerdo excelente** (0.5 %). Las dos misiones miden lo
+  mismo; la media no depende de la resolución.
+- **Pendiente y rugosidad: DIFIEREN por diseño, no es un error.** LOLA
+  entrega puntos dispersos a lo largo de órbitas (huecos de decenas de
+  metros a cientos), así que su pendiente "suaviza" el terreno; el DTM
+  muestrea la superficie completa cada 26.7 m y ve los relieves cortos
+  (borde de cráteres pequeños, bloques) que la nube de puntos se salta.
+  Ambos cuentan la MISMA historia operativa para este sitio: terreno
+  llano-moderado, rugosidad manejable (<5 m). Si se integra, hay que
+  decidir qué definición es "la oficial" del informe (o reportar ambas
+  como rango), porque los números NO son intercambiables 1:1.
+- DTM a favor: 12.978 muestras vs 790, muestreo uniforme (la nube LOLA
+  concentra puntos en las huellas de las órbitas).
+- DTM en contra: 1 tile cubre ±0.05° perfecto; cajas grandes (±0.5°)
+  pueden necesitar varios tiles (el piloto hoy usa solo 1 y reporta la
+  cobertura; mosaico multi-tile pendiente).
+
+- PENDIENTE: sitio polar (Malapert) y sitio 41.2/-23.7; ver 3.4.
+
+### 3.2bis Tiempo frío con descarga real (Smythii, tile borrado a propósito)
+
+- **STAC 3.3 s + descarga 4.4 s (tile ~7 MB) + cómputo 0.5 s = 8.2 s TOTAL.**
+- Los números de calidad salen idénticos a los del tibio (el cómputo es
+  determinista sobre el mismo archivo).
+- Comparación del tiempo total contra la vía GDS para el MISMO dato
+  (elevación): GDS LOLA ≈ 16 s solo en generar+bajar la nube (y minutos
+  en horas punta), sin contar que a radios grandes se dispara; DTM frío
+  8.2 s, tibio 3.6 s. Con la caché GDS activa el LOLA tibio también es
+  rápido, pero el DTM gana en frío y da 16× más muestras.
 
 ---
 
