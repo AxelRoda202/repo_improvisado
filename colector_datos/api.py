@@ -45,6 +45,29 @@ from . import (
 )
 
 
+def _capas_trek(cuerpo: str, projtype: str) -> tuple[list, str]:
+    """(capas, texto_de_fuente) del catálogo Treks, tolerante a fallos.
+
+    Se usa tanto en la ruta paralela (dentro de un hilo) como en la serie,
+    por eso vive en una función propia: nunca lanza, el error va en el texto.
+    """
+    from nsac.sources import trek
+
+    try:
+        capas = trek.layers(cuerpo, projtype=projtype)
+        return capas, f"Treks ({len(capas)} capas, proyección {projtype})"
+    except Exception as exc:
+        return [], f"Treks FALLÓ: {exc}"
+
+
+def _dtm_de_stac(cuerpo: str, bbox_s: tuple, lat: float) -> tuple[Any, str]:
+    """(catálogo DTM, texto_de_fuente) del STAC de USGS, tolerante a fallos."""
+    try:
+        return topografia.dtm_disponibles(cuerpo, bbox_s, lat), "USGS STAC (DTM)"
+    except Exception as exc:
+        return {"error": str(exc)}, "USGS STAC FALLÓ"
+
+
 def _aviso(aviso, mensaje: str) -> None:
     """Informa del avance si el llamador pasó una función `aviso` (p.ej. print).
 
@@ -222,16 +245,33 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     #    módulos (topografía, minerales, polvo, iluminación, PSR).
     #    (Solo Luna/Marte: la Tierra no tiene catálogo Treks.)
     # ------------------------------------------------------------------
-    from nsac.sources import trek
-
     capas_trek: list[dict[str, Any]] = []
-    if cuerpo != "earth":
-        try:
-            capas_trek = trek.layers(cuerpo, projtype=projtype)
-            resultado["metadatos"]["fuentes"].append(
-                f"Treks ({len(capas_trek)} capas, proyección {projtype})")
-        except Exception as exc:
-            resultado["metadatos"]["fuentes"].append(f"Treks FALLÓ: {exc}")
+
+    # ------------------------------------------------------------------
+    # LUNA con GDS: se lanzan EN PARALELO las 4 llamadas independientes
+    # (catálogo Treks, GDS Diviner, GDS LOLA y catálogo STAC). Antes iban
+    # en serie y la consulta completa esperaba ~77 s: en paralelo tarda lo
+    # que la más lenta (~45 s, medido). Con la caché activa las GDS vuelven
+    # en milisegundos y el techo lo pone el catálogo Treks (~8 s).
+    # ------------------------------------------------------------------
+    futuros: dict[str, Any] = {}
+    if cuerpo == "moon" and usar_gds:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _aviso(aviso, "En paralelo (4 hilos): catálogo Treks + GDS Diviner + "
+               "GDS LOLA + catálogo STAC... (1ª vez: minutos; con caché: segs)")
+        pool = ThreadPoolExecutor(4)
+        futuros = {
+            "_pool": pool,
+            "capas": pool.submit(_capas_trek, cuerpo, projtype),
+            "diviner": pool.submit(termico.datos_diviner, cajas_g),
+            "lola": pool.submit(topografia.elevacion_lola, cajas_g),
+            "dtm": pool.submit(_dtm_de_stac, cuerpo, bbox_s, lat),
+        }
+    elif cuerpo != "earth":
+        # Marte / pruebas sin GDS: el catálogo se baja en serie como siempre.
+        capas_trek, fuente_trek = _capas_trek(cuerpo, projtype)
+        resultado["metadatos"]["fuentes"].append(fuente_trek)
 
     # ==================================================================
     # LUNA: datos crudos de LOLA + Diviner (las 2 únicas descargas reales)
@@ -240,7 +280,20 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         res_div: dict[str, Any] = {}
         res_lola: dict[str, Any] = {}
 
-        if usar_gds:
+        if futuros:
+            # Recogemos los resultados del pool paralelo. Las 4 funciones
+            # internas ya capturan sus propios errores y devuelven dicts de
+            # error, así que .result() no debe lanzar nada inesperado.
+            res_div = futuros["diviner"].result()
+            res_lola = futuros["lola"].result()
+            capas_trek, fuente_trek = futuros["capas"].result()
+            resultado["metadatos"]["fuentes"].append(fuente_trek)
+            dtm_precargado, fuente_stac = futuros["dtm"].result()
+            resultado["metadatos"]["fuentes"].append(fuente_stac)
+            futuros["_pool"].shutdown()
+        elif usar_gds:
+            # Ruta de respaldo (no debería usarse: el pool se crea siempre
+            # que hay GDS lunar, pero queda por robustez).
             _aviso(aviso, "GDS Diviner (temperaturas): VARIOS MINUTOS...")
             res_div = termico.datos_diviner(cajas_g)
             _aviso(aviso, "GDS LOLA (elevación): otros VARIOS MINUTOS...")
@@ -270,13 +323,17 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         else:
             topo["elevacion_m"] = res_lola.get("error",
                                                "sin datos (usar_gds=False?)")
-        try:
-            _aviso(aviso, "Catálogo STAC de DTM (USGS)...")
-            topo["dtm_descargables"] = topografia.dtm_disponibles(
-                cuerpo, bbox_s, lat)
-            resultado["metadatos"]["fuentes"].append("USGS STAC (DTM)")
-        except Exception as exc:
-            topo["dtm_descargables"] = {"error": str(exc)}
+        if futuros:
+            # El STAC ya se consultó en paralelo; solo se enchufa su resultado.
+            topo["dtm_descargables"] = dtm_precargado
+        else:
+            try:
+                _aviso(aviso, "Catálogo STAC de DTM (USGS)...")
+                topo["dtm_descargables"] = topografia.dtm_disponibles(
+                    cuerpo, bbox_s, lat)
+                resultado["metadatos"]["fuentes"].append("USGS STAC (DTM)")
+            except Exception as exc:
+                topo["dtm_descargables"] = {"error": str(exc)}
         topo["capas_trek"] = topografia.capas_topografia_trek(capas_trek)
         resultado["topografia"] = topo
 

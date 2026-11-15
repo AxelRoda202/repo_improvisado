@@ -34,27 +34,28 @@ def normalizar_cuerpo(nombre: str) -> str:
 def cajas_gds(lat: float, lon: float, radio: float) -> list[tuple[float, float, float, float]]:
     """Cajas (minlat, maxlat, oeste, este) para el GDS de PDS.
 
-    El GDS rechaza cualquier caja que CRUCE el meridiano 0 (p.ej. -0.5 a +0.5
-    da 'Invalid Lat/Lon Bounding Box'), así que si la caja lo cruza se parte
-    en dos mitades: [oeste..0] y [0..este]. Devuelve una LISTA porque puede
-    haber una o dos cajas; el llamador repite la consulta por cada una y junta
-    los resultados. Latitudes se recortan al rango [-90, 90].
+    El GDS trabaja SIEMPRE en el convenio de longitudes 0-360 y rechaza
+    cualquier caja con longitud negativa (p.ej. un sitio en lon -23.7 daba
+    'Invalid Lat/Lon Bounding Box'). Por eso aquí se convierte TODO a 0-360:
+    una longitud de -23.7 pasa a ser 336.3 y el GDS la acepta.
+
+    Si la caja convertida cruza el 360 (que es el mismo meridiano 0;
+    p.ej. lon 0.05 con radio 0.1 → 359.95..360.15), se parte en dos mitades:
+    [oeste..360] y [0..este]. Devuelve una LISTA porque puede haber una o
+    dos cajas; el llamador consulta cada una y junta los resultados.
+    Los módulos que leen los CSV ya normalizan las longitudes a [-180, 180].
+    Latitudes se recortan al rango [-90, 90].
     """
     lat_sur = max(-90.0, lat - radio)
     lat_norte = min(90.0, lat + radio)
-    oeste = lon - radio
-    este = lon + radio
+    oeste = (lon - radio) % 360.0
+    este = (lon + radio) % 360.0
 
-    # Si al restar el radio nos salimos de -180, pasamos al convenio 0-360.
-    if oeste < -180.0:
-        oeste += 360.0
-        este += 360.0
-
-    cruza_el_cero = oeste < 0.0 <= este
-    if cruza_el_cero:
-        return [(lat_sur, lat_norte, oeste, 0.0),
-                (lat_sur, lat_norte, 0.0, este)]
-    return [(lat_sur, lat_norte, oeste, este)]
+    if oeste <= este:
+        return [(lat_sur, lat_norte, oeste, este)]
+    # La caja cruza el 360 (el meridiano 0 en el convenio [-180, 180]).
+    return [(lat_sur, lat_norte, oeste, 360.0),
+            (lat_sur, lat_norte, 0.0, este)]
 
 
 def caja_stac(lat: float, lon: float, radio: float) -> tuple[float, float, float, float]:

@@ -35,14 +35,18 @@ def elevacion_lola(cajas: list[tuple[float, float, float, float]]) -> dict[str, 
       - 'errores': qué cajas fallaron, si alguna.
     """
     import pandas as pd
-    from nsac.sources import pds
+    from . import cache_gds
 
+    # Cada caja pasa por la caché local: la 1ª vez baja del GDS (minutos),
+    # las siguientes se leen del disco (milisegundos). Los datos LOLA son
+    # históricos: re-bajarlos daría lo mismo.
     frames: list[Any] = []
     errores: list[str] = []
     for caja in cajas:
         try:
             # 'lolardr' = LRO LOLA RDR: un punto por disparo del láser.
-            frames.append(pds.gds_extract_points("lolardr", caja))
+            df_caja, _ruta, _cache = cache_gds.leer_o_descargar("lolardr", caja)
+            frames.append(df_caja)
         except Exception as exc:
             errores.append(f"caja {caja}: {exc}")
 

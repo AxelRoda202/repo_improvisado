@@ -33,9 +33,11 @@ def datos_diviner(cajas: list[tuple[float, float, float, float]]) -> dict[str, A
       'errores'                 -> texto si alguna caja falló
     """
     import pandas as pd
-    from nsac.sources import pds
+    from . import cache_gds
 
     # --- 1) una consulta GDS por caja (normalmente solo hay una) ----------
+    # Cada CSV pasa por la caché local: la primera vez se baja del GDS y se
+    # guarda; las siguientes se leen del disco en milisegundos.
     frames: list[Any] = []
     errores: list[str] = []
     for caja in cajas:
@@ -43,8 +45,9 @@ def datos_diviner(cajas: list[tuple[float, float, float, float]]) -> dict[str, A
             # channel="fffffffff": las 9 banderas a False = pedimos los 9
             # canales. (El preset de nsac trae "ffttttttt" = solo térmicos;
             # con 'f' también llegan los solares y así ahorrarnos otra llamada.)
-            frames.append(pds.gds_extract_points("divinerrdr", caja,
-                                                 channel="fffffffff"))
+            df_caja, _ruta, _cache = cache_gds.leer_o_descargar(
+                "divinerrdr", caja, channel="fffffffff")
+            frames.append(df_caja)
         except Exception as exc:
             errores.append(f"caja {caja}: {exc}")
 
