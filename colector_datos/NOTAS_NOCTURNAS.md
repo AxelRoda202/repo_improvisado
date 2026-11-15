@@ -687,3 +687,150 @@ disponibilidad THEMIS (ventana ≤ 1 mes, nunca valores inventados).
   nulos.
 - `db_sitios_marte.py`: NUEVO módulo (indexar/enriquecer/listar/
   reintentar/estado, CLI incluido).
+
+---
+
+# CUARTA SESIÓN (15 nov, ramas `tierra-datos-crudos` + `tierra-glo90-rapida`):
+# DATOS CRUDOS DE LA TIERRA EN EL MISMO FORMATO QUE LUNA Y MARTE
+
+**Pregunta que abrió la sesión:** la Tierra era el pariente pobre del
+colector — `obtener_datos_sitio('tierra', ...)` devolvía solo CATÁLOGOS
+(nombres/ids de colecciones CMR, escenas, capas GIBS) mientras Luna y Marte
+devuelven NÚMEROS crudos por sección. Objetivo: paridad de formato sin
+credenciales obligatorias. **ESTADO: COMPLETADO y verificado end-to-end.**
+
+## 18. Ruta ejecutada (paso a paso, cada paso = 1 commit)
+
+| Paso | Qué | Fuente elegida | ¿Auth? | Medido |
+|---|---|---|---|---|
+| 1. Topografía | elevación/pendiente/rugosidad/cráteres | **Copernicus DEM GLO-30** (bucket AWS público, tile 1°×1°, ~30 m/px) | NO | frío 43-196 s (red lenta; varía) / tibio **0.07 s** |
+| 2. Térmico | TS en K + día/noche + estacional | **NASA POWER** (MERRA-2, 2 peticiones JSON ~2 s) | NO | **3.2 s** |
+| 3. Superficie | reflectancia visible + NDVI + máscara SCL | **Sentinel-2 L2A via Earth Search** (Element84, COG en AWS abierto) | NO | frío ~42 s (5 bandas remotas) / tibio **1.3 s** |
+| 4. Iluminación | fracción diurna + energía solar | **cálculo local** (geometría solar, 0 llamadas) | NO | <1 s |
+| 5. Integración | `api.py`: mismas secciones que luna/marte | pool de 3 hilos | — | tibio **~5 s** |
+| 6. Verificación | comparación lado a lado de `resumen` | `prueba_tierra_comparacion.py` | — | ver §19 |
+
+Sondas descartadas en el camino (medidas contra la red real):
+- **Landsat C2 L2** (landsatlook STAC público, 1.8 s, escenas recientes):
+  los COG redirigen al login de EROS (ERS) → requiere cuenta gratuita.
+  Descartada para la vía sin-credenciales.
+- **MOD11A2 (MODIS LST 1 km)**: HEAD responde 200 pero el GET real da
+  **401 "HTTP Basic: Access denied"** (rutas `lp-prod-protected`). OJO:
+  el HEAD MIENTE; siempre probar con un GET de rango. Queda como vía
+  MEJORADA opcional (ver §21).
+- El primer sonda térmico eligió por error una colección FEDEO/INPE (0
+  granules con bbox): **filtrar siempre por proveedor `-LPCLOUD`**.
+
+## 19. Resultado final: paridad de formato (tabla comparada real)
+
+`python -m colector_datos.prueba_tierra_comparacion --luna_completa`
+(15-nov-2026, este dispositivo):
+
+| Clave del resumen | TIERRA Atacama | LUNA Smythii | MARTE Jezero |
+|---|---|---|---|
+| elevacion_media_m | **+1564** | -2325 | -2610 |
+| pendiente_media_grados | **4.72** | 3.73 | 2.27 |
+| rugosidad_media_m | **2.69** | 1.93 | 1.11 |
+| temperatura_media_k | **292** | 230 | — (sin GDS marciano, nota) |
+| diferencia_dia_noche_k | **19.2** | 193 | — |
+| variacion_estacional_k | **11.1** | 241 | — |
+| reflectancia_media | **0.199** | 0.111 | — (capas Treks) |
+| energia_solar_media_wm2 | **573** | 799 | — |
+| fraccion_diurna | **0.5** | 0.587 | — |
+| n_puntos_lola | **129 600** (px GLO-30) | 12 978 (px Kaguya) | 777 763 (px CTX) |
+| n_observaciones_diviner | **8760** (horas POWER) | 14 395 | — |
+| via_topografia | **glo30** | dtm_kaguya | dtm_mro |
+| Tiempo de pared | 5.1 s tibio | 48.9 s frío | 0.6 s tibio |
+
+Mismas claves, mismas unidades (K, m, °, 0-1, W/m²) → la comparación 1:1
+y la puntuación de análogos ya puede consumir los tres vectores igual.
+
+## 20. Complicaciones encontradas y CÓMO SE RESOLVIERON (registro)
+
+1. **Convención de nombres de tile GLO-30**: no es `W70_00` sino
+   `W070_00` (longitud SIEMPRE con 3 dígitos; latitud con 2). Destapado
+   porque Atacama daba 404 con la convención "obvia" y Death Valley 200.
+   El bucket además ES LISTABLE (GET con `list-type=2`) — útil para
+   verificar cobertura sin STAC.
+2. **Tiles de océano puro NO existen** (404 del bucket): p.ej. 35°N 35°W.
+   No es un fallo de red: se traduce a un mensaje claro ("sitio en mar
+   abierto") en `topografia_tierra.analizar_sitio`.
+3. **El tile GLO-30 es band-strided (NO COG en teselas)**: la lectura
+   remota /vsicurl de una ventana de 360×360 hace ~360 peticiones de rango
+   (medido ~17-22 s) — al revés que Kaguya/CTX (COG, ventana en ~6 s).
+   Por eso en la Tierra la vía por defecto es DESCARGAR el tile completo
+   y cachearlo (tibio 0.07 s). La vía 'remoto' sigue disponible con
+   `modo_tile='remoto'`.
+4. **Sentinel-2 en UTM**: window read directo con lon/lat da ventanas
+   vacías (0×0). Hay que transformar la caja de EPSG:4326 a la CRS del
+   tile (`rasterio.warp.transform`) — en la Tierra PROJ funciona, sin
+   trucos IAU.
+5. **La banda SCL va a 20 m y las bandas a 10 m**: la máscara hay que
+   sobremuestrearla 2×2 (vecino más próximo) o salta un error de broadcast.
+6. **`rasterio.warp` no viene con `import rasterio`**: importar
+   explícitamente (falló en la primera corrida de Sentinel).
+7. **Bug real corregido en `nsac/sources/earthdata.py`**: CMR devuelve
+   `granule_size` como float ("6.444...") y `int()` casca — ahora `float()`.
+   Descubierto al buscar granules de MOD11A2 (búsqueda 200 sin auth, 0.2 s).
+8. **Landsat vs Sentinel-2 en cabeceras**: HEAD de LandsatLook 302 → HTML
+   de login; GET con rango confirma. Lección: **no fiarse del HEAD** para
+   decidir si un recurso es abierto.
+9. **Rugosidad falsa a 90 m/px** (GLO-90): una celda de 100 m contiene
+   1 píxel → std = 0 ("terreno liso" falso). Corregido con celda mínima de
+   2 píxeles por lado (Atacama 90 m: 3.19 m en celdas de 177 m vs 2.69 m
+   en celdas de 113 m del GLO-30 — coherente).
+10. **Varianza de POWER**: la media anual de TS para Death Valley dio
+    294.171 K en dos corridas y 291.771 K en una intermedia (n=8760 igual
+    en todas). Es un reanálisis vivo: puede refrescar sus series. No es
+    un bug del colector; no comparar con más de 1 decimal.
+
+## 20-bis. Sub-rama `tierra-glo90-rapida` — comparativa de fríos (medida)
+
+Mismo sitio, primera visita SIN caché (nov-2026, red de 0.2-0.7 MB/s):
+
+| Sitio | GLO-30 frío (37-42 MB) | GLO-90 frío (4-5 MB) | Δ elevación | Δ pendiente |
+|---|---|---|---|---|
+| Atacama ±0.05 | 43.6 s (hasta 196 s) | **8.6 s** | 0.05 % | 4.72° → 3.90° |
+| Death Valley ±0.1 | 61.5 s | **7.3 s** | 0.33 % | 19.0° → 15.8° |
+| Haughton ±0.2 | 22.0 s | **2.2 s** | ~0 % | 5.79° → 4.87° |
+
+- Elevación: acuerdo excelente (la media no depende de la resolución).
+- Pendiente/rugosidad: GLO-90 "suaviza" el terreno corto — la misma
+  relación dirección-resolución que LOLA vs DTM Kaguya (§9.1): NO son
+  intercambiables 1:1 para "¿se puede aterrizar?".
+- Veredicto: **GLO-30 sigue siendo el valor por defecto** (fidelidad para
+  el análogo definitivo); GLO-90 es la vía de CRIBA rápida cuando hay que
+  fríos-teclear MUCHOS sitios. Activar con
+  `topografia_tierra.analizar_sitio(..., resolucion='90m')`.
+- Ambas conviven en la misma rama (la sub-rama se fusionó --ff-only al
+  quedar aditiva y retrocompatible: por defecto sigue '30m').
+
+## 21. Credenciales (solo si se quiere la vía mejorada, NO obligatorias)
+
+Todo lo anterior funciona **sin ninguna cuenta**. La única mejora que
+requiere credenciales es el térmico de 1 km real (MOD11A2 en vez del
+reanálisis POWER de ~50 km):
+
+1. Crear cuenta gratuita en https://urs.earthdata.nasa.gov/users/new
+   (aceptar las Apps de LP DAAC en el perfil: "Approve Applications").
+2. Copiar `.env.example` a `.env` y rellenar:
+       EARTHDATA_USERNAME=<usuario>
+       EARTHDATA_PASSWORD=<contraseña>
+3. Las peticiones autenticadas usarían `earthaccess` (ya en
+   requirements.txt, auth extra de `.env`); el resto del colector no las
+   toca. Pendiente de implementar: descargar el granule HDF (401 sin
+   credenciales, verificado) y leer `LST_Day_1km`/`LST_Night_1km` con
+   rasterio (comprobar que el wheel trae el driver HDF4-EOS).
+   Otras cuentas que el proyecto ya contempla en `.env.example`:
+   CDSE (descargas Sentinel-1/2/3 de Copernicus) y JAXA G-Portal.
+
+## 22. Estado y pendiente (para la siguiente sesión)
+
+- Hecho: paridad completa de formato tierra/luna/marte; 6 commits en
+  `tierra-datos-crudos` (pasos 1-6) + 1 en la sub-rama fusionada.
+- Pendiente opcional: MOD11A2 con Earthdata (§21); aerosol MODIS/Sentinel-5P
+  para "polvo" terrestre; humedad SMAP (requiere Earthdata también);
+  mosaico multi-tile GLO-30 para cajas que pisan 2 tiles en el
+  antimeridiano (hoy se reporta cobertura < 1).
+- La rama `tierra-datos-crudos` NO está en `master` (igual que
+  `dtm-rasterio`): falta revisión/push (NOTAS §11).

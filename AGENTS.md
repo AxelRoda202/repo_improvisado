@@ -90,36 +90,33 @@ que el `resumen` del registro (claves y valores) se mantiene — ver
 
 ## Git
 
-- Trabajo actual en la rama `dtm-rasterio` (contiene optimización GDS + DTM +
-  Marte + DB); `master` está por detrás. Pushear ha dado 403 con la
-  credencial de este dispositivo (ver NOTAS §11): Axel empuja desde el suyo.
+- Ramas actuales: `tierra-datos-crudos` (sobre `dtm-rasterio`, que a su vez
+  va por delante de `master`). Contiene la paridad Tierra (NOTAS §18-22);
+  la sub-rama `tierra-glo90-rapida` ya está fusionada en ella (--ff-only).
+  Pushear ha dado 403 con la credencial de este dispositivo (ver NOTAS §11):
+  Axel empuja desde el suyo.
 - Lección repetida de la bitácora: un fix no está hecho hasta que está
   **comiteado** (un fix solo en disco se perdió al sincronizar ramas).
 
-## Estado actual y pendiente principal (NO codificado aún)
+## Estado actual
 
-**Brecha Tierra vs Luna/Marte:** `obtener_datos_sitio('tierra', ...)` NO
-devuelve aún el mismo formato de datos crudos. Luna y Marte devuelven números
-reales en cada sección (elevación/pendiente/rugosidad del DTM, temperatura
-Diviner, albedo, iluminación); `analogos_tierra.datos_tierra` solo devuelve
-CATÁLOGOS (nombres/ids de colecciones CMR, escenas Sentinel-2, capas GIBS) —
-ver `colector_datos/analogos_tierra.py`. La ruta de acción acordada (a
-verificar antes de codificar):
+**Paridad Tierra COMPLETADA** (rama `tierra-datos-crudos`, NOTAS §18-22):
+`obtener_datos_sitio('tierra', ...)` devuelve las MISMAS secciones con
+números crudos que Luna y Marte, todo sin credenciales:
 
-1. **Topografía (el trozo más barato):** reutilizar la receta de
-   `topografia_dtm.analizar_sitio` para `cuerpo='tierra'` — en la Tierra no
-   hay problema de CRS (EPSG:4326 estándar, PROJ funciona). DEM candidato:
-   Copernicus DEM GLO-30 (abierta en AWS, sin auth) o ASTER/SRTM vía CMR
-   (necesita Earthdata Login). Devolver `elevacion_m/pendiente/rugosidad` con
-   las mismas claves y `utilidades.estadisticas`.
-2. **Térmico:** MODIS LST (MOD11) vía CMR `search_granules` + `earthaccess`
-   (auth gratuita), o ERA5; mismo dict que Diviner (media/max/min,
-   día/noche). Coste/tiempo a medir antes de decidir.
-3. **Superficie:** reflectancia Sentinel-2 (CDSE) o MODIS BRDF; albedo con
-   las mismas claves que `superficie.py`.
-4. **Iluminación:** cálculo local de geometría solar (igual que Luna/Marte),
-   sin llamadas nuevas.
-5. **Regla de oro del proyecto:** si una fuente no da el dato, `nota` honesta
-   (como hace Marte con THEMIS) — NUNCA inventar números.
-6. Verificación: `prueba_tierra.py` comparando claves de `resumen` Tierra vs
-   Luna vs Marte, misma plantilla de NOTAS §2.3.
+- **Topografía**: Copernicus DEM GLO-30 (tile 1°×1° determinista de AWS
+  público, sin STAC; `topografia_tierra.py`). Frío 43-196 s (tile 37-42 MB
+  cacheado; el tile es band-strided, NO COG) / tibio 0.07 s. Variante
+  rápida `resolucion='90m'` (GLO-90, frío 2-10 s).
+- **Térmico**: NASA POWER (MERRA-2 TS; `termico_tierra.py`), 2 peticiones
+  ~2 s, mismas claves que Diviner en K.
+- **Superficie**: Sentinel-2 L2A via Earth Search/Element84
+  (`superficie_tierra.py`), COG abiertos, reflectancia+NDVI+máscara SCL;
+  tibio ~1-3 s. 
+- **Iluminación**: geometría solar local, 0 llamadas (`iluminacion_tierra.py`).
+- Verificación end-to-end: `python -m colector_datos.prueba_tierra_comparacion
+  --luna_completa` — tabla resumen tierra/luna/marte en NOTAS §19.
+- Pendiente opcional: MOD11A2 con Earthdata Login (mejora térmica a 1 km,
+  credenciales en `.env`, NOTAS §21); aerosol Sentinel-5P/MODIS; SMAP;
+  mosaico multi-tile GLO-30 en el antimeridiano (hoy cobertura < 1).
+
