@@ -666,9 +666,16 @@ disponibilidad THEMIS (ventana ≤ 1 mes, nunca valores inventados).
 - La proporción 'sin_dtm' es ALTA (~90 % en los primeros lotes): es la
   cobertura real de los DTM controlados del MRO. Por eso la DB es útil:
   evita que el usuario pruebe caja tras caja sin datos.
-- `enriquecer --max 1200 --hilos 2` corriendo al finalizar esta sesión
-  (~1.124 sitios, ~11 s/sitio ÷ 2 hilos ≈ 90 min). Es resumible: si se
-  corta, se repite el comando y continúa.
+- **Corrida final completa** (2 tandas por corte del shell de fondo;
+  resumible como estaba previsto): 1.133 sitios en ~25 min de red, **0
+  errores**. Resultado: **199 'listo'** (17,6 % — la cobertura real de
+  los DTM controlados del MRO, ~5 % de la superficie pero coinciden con
+  los lugares famosos), **934 'sin_dtm'** con motivo guardado. 328
+  mediciones THEMIS en las ventanas; los 199 listos tienen TODOS ≥ 1 obs
+  en su ventana (THEMIS sigue activo). Muestras plausibles: Apollinaris
+  Tholus +1.634 m, Bamberg (cráter) piso -5.057 m, Acheron Fossae +106 m.
+- `listar` con solo_listos devuelve los 199 en formato de comparación,
+  listos para ser el menú de la app.
 
 ### 17.4 Soporte tocado en esta sesión
 
