@@ -309,8 +309,18 @@ def _crateres_de_malla(z, z_transform, fila0: int, col0: int, crs,
 
 def analizar_sitio(lat: float, lon: float, radio: float,
                    items_stac: list[dict] | None = None,
-                   aviso=None, cuerpo: str = "moon") -> dict[str, Any]:
+                   aviso=None, cuerpo: str = "moon",
+                   modo_tile: str = "descargar") -> dict[str, Any]:
     """Piloto completo del experimento A para UN sitio (Luna o Marte).
+
+    modo_tile:
+      'descargar' (por defecto): baja el GeoTIFF completo a data/cache/dtm/
+        y lo reutiliza en las siguientes visitas (la vía normal del colector).
+      'remoto': NO descarga el tile; lee el trozo que interesa directamente
+        por HTTP con /vsicurl de GDAL (peticiones de rango). Mucho más
+        barato para indexar MUCHOS sitios (la DB de sitios marcianos) a
+        cambio de repetir el tráfico si se visita el mismo sitio varias
+        veces; requiere que el TIFF esté "tiled" (los COG del STAC lo son).
 
     Pasos (cronometrados por separado):
       1. STAC: elegir el tile DEM (Kaguya TC en la Luna, CTX/HiRISE en
@@ -364,19 +374,31 @@ def analizar_sitio(lat: float, lon: float, radio: float,
         out["url"] = tile.get("url_mejor_asset")
 
         # --- 2) descarga (con reutilización local) -------------------------
-        CARPETA_TILES.mkdir(parents=True, exist_ok=True)
-        ruta_tif = CARPETA_TILES / (f"{tile.get('id')}.tif")
-        if ruta_tif.exists():
-            _aviso(f"tile ya en disco: {ruta_tif.name}")
+        # En modo 'remoto' no se baja nada: /vsicurl de GDAL abre el TIFF
+        # del S3 directamente y pide por HTTP solo los bytes de la ventana
+        # (los COG del STAC están 'tiled', verificado en Jezero: la lectura
+        # remota de 882x882 px tarda ~6 s y da los mismos números que el
+        # fichero bajado). En modo 'descargar' se baja el tile completo a
+        # data/cache/dtm/ y las visitas siguientes no tocan la red.
+        if modo_tile == "remoto":
+            ruta_tif = f"/vsicurl/{tile['url_mejor_asset']}"
             out["descarga_s"] = 0.0
-            out["de_cache"] = True
-        else:
-            from nsac import http
-            _aviso(f"bajando tile DEM ({tile.get('id')})...")
-            t0 = time.perf_counter()
-            http.download(tile["url_mejor_asset"], ruta_tif)
-            out["descarga_s"] = round(time.perf_counter() - t0, 1)
             out["de_cache"] = False
+            out["acceso"] = "remoto (vsicurl)"
+        else:
+            CARPETA_TILES.mkdir(parents=True, exist_ok=True)
+            ruta_tif = CARPETA_TILES / (f"{tile.get('id')}.tif")
+            if ruta_tif.exists():
+                _aviso(f"tile ya en disco: {ruta_tif.name}")
+                out["descarga_s"] = 0.0
+                out["de_cache"] = True
+            else:
+                from nsac import http
+                _aviso(f"bajando tile DEM ({tile.get('id')})...")
+                t0 = time.perf_counter()
+                http.download(tile["url_mejor_asset"], ruta_tif)
+                out["descarga_s"] = round(time.perf_counter() - t0, 1)
+                out["de_cache"] = False
 
         # --- 3) window read + métricas ------------------------------------
         import rasterio

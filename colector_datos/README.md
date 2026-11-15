@@ -59,6 +59,9 @@ colector_datos/
   analogos_tierra.py   el lado terrestre de la comparación (CMR/GIBS/S2)
   cache_gds.py         caché local de los CSV del GDS (Diviner/LOLA)
   cache_catalogo.py    caché local de catálogos (Treks, STAC)
+  db_sitios_marte.py   DB local de sitios marcianos con nombre (Gazetteer
+                       + DTM remoto + ventana THEMIS): el menú de sitios
+                       con datos reales para ofrecer al usuario
   ejemplo_uso.py       script de muestra ejecutable
   prueba_funcion.py    informe legible de un sitio (--sin_dtm para vía LOLA)
   prueba_tierra.py     informe de análogos terrestres
@@ -118,6 +121,37 @@ misión cubiertas por los DTMs controlados de CTX/HiRISE). Sitios SIN tiles
 (p.ej. Gale): la sección topográfica queda en catálogos con
 `nota_elevacion` explicando cómo descargar el DTM de PDS ODE — nunca se
 inventan números.
+
+### DB de sitios disponibles (`db_sitios_marte.py`)
+
+Para no adivinar qué sitios tienen datos, hay una DB local (SQLite,
+`data/db/sitios_marte.db`, gitignored como las cachés) que indexa los
+**1.133 lugares con nombre** del Gazetteer IAU/USGS de Marte (cráteres
+≥ 40 km + montes, valles, planicies, pateras...) y, por cada uno:
+
+- **Topografía** en el MISMO `resumen` del registro
+  (`elevacion_media_m`, `pendiente_media_grados`, `rugosidad_media_m`,
+  `n_puntos_lola` = píxeles, `via_topografia='dtm_mro'`), calculada SIN
+  descargar tiles (lectura remota `/vsicurl` del trozo del GeoTIFF del
+  STAC). Solo pasa a 'listo' un sitio que cumpla la misma política que
+  `obtener_datos_sitio` (cobertura ≥ 50 %); el resto queda 'sin_dtm' con
+  el motivo — la DB refleja la cobertura real de los DTM controlados.
+- **THEMIS** (mediciones múltiples): metadatos de disponibilidad — cuántas
+  observaciones IRBTR4 hay en la caja (ODE) y el detalle de las de la
+  **ventana de un mes** hacia atrás desde la última (ids + fechas en la
+  tabla `mediciones`). Nunca valores térmicos inventados.
+
+```powershell
+python -m colector_datos.db_sitios_marte indexar        # Gazetteer -> 1.133 'pendiente' (idempotente)
+python -m colector_datos.db_sitios_marte enriquecer --max 50   # resumible; hilos 2-3 máx
+python -m colector_datos.db_sitios_marte listar --n 15  # sitios 'listo' en formato de comparación
+python -m colector_datos.db_sitios_marte estado
+```
+
+El flujo pensado para la app: `listar` ofrece opciones reales al usuario →
+el sitio elegido (lat/lon/radio) se pasa a `obtener_datos_sitio("marte", ...)`,
+que reproduce los números de la DB (verificado end-to-end en Jezero: mismo
+tile, mismos valores). Detalles y sondeos: `NOTAS_NOCTURNAS.md` §17.
 
 ## Detalles de diseño (por qué está hecho así)
 

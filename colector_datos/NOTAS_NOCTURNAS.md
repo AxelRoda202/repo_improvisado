@@ -594,3 +594,89 @@ la receta DTM a Marte con el MISMO formato de diccionario.
 | Luna | DTM Kaguya (malla 19-30 m) o LOLA GDS | Diviner GDS (real, 9 canales) | Treks + Clementine | DTM→LOLA (política ≥50 % px, ≥90 % cobertura) |
 | Marte | DTM CTX/HiRISE (malla ~20 m) o catálogos | THEMIS/TES (capas; sin puntual) | Treks (CRISM/Ω) | sin DTM→nota honesta |
 | Tierra | análogos_tierra (CMR/GIBS) | GIBS | Copernicus | — |
+
+## 17. DB local de sitios marcianos (`db_sitios_marte.py`) — 4ª sesión
+
+Pedida para dejar de adivinar: "¿qué lugares de Marte tienen datos?" pasa
+de sondeo manual a una lista consultable. La DB indexa lugares CON NOMBRE
+del Gazetteer y guarda topografía (formato de comparación) + metadatos de
+disponibilidad THEMIS (ventana ≤ 1 mes, nunca valores inventados).
+
+### 17.1 Sondeos previos (los que decidieron el diseño)
+
+| Sondeo | Resultado | Consecuencia de diseño |
+|---|---|---|
+| Conteo total de la colección CTX del STAC (paginada) | **44.628 items** (todos con `start_datetime`), 172.8 s, y el HiRISE dio 502 por la carga | NO indexar por tiles: imposible enriquecer 44k y el STAC no aguanta. Indexar por LUGARES |
+| `/vsicurl/` + window read del tile CTX de Jezero | 882×882 px, media -2607.3, **6.3 s** — mismos números que el fichero bajado | Los stats se calculan leyendo el trozo por HTTP: cero descargas de tiles |
+| `format=CSV` del Gazetteer | Param solo-cliente: el CSV lo arma el JS en el navegador | Parsear la tabla HTML `search_results` con regex |
+| Gazetteer sin filtro (`PageSize=500`) | **2.100 lugares de Marte en UNA página**, 3.1 s | 1 GET para toda la lista |
+| Combos ODE (IIPT) | `ODY/THEMIS/IRBTR4` válido (PDS4, con fechas de obs) | Fuente de mediciones múltiples |
+| ODE `Count` con limit 200/500 | Devuelve tantas filas como el límite; Jezero ±0.1° = 211 obs reales, rango 2002-02-28 → 2026-02-26 (THEMIS sigue activo) | límite 500; el total real = longitud de la lista |
+| ODE PDS4: `Id`/`Start_time` | `None`; los datos están en `Observation_time`, `Solar_time` y el id en `FilesURL?product_id=` | `ode_products` extendido (`_id_de_url`, observation_time, solar_time) |
+| Ventana de 31 días en Jezero | Solo 1 obs de 211 (2026-02-26) | Guardar TODOS los ids de la ventana (aunque sea 1): honestidad > volumen |
+
+### 17.2 Diseño
+
+- **Filtro de indexado** (`indexar_gazetteer`): 2.100 filas − 127 'Albedo
+  Feature' (sin relieve) − 840 cráteres < 40 km (el DTM de 20 m/px no
+  resuelve bien cráteres chicos y serían cientos de lecturas al cuete) →
+  **1.133 sitios 'pendiente'** (410 cráteres ≥ 40 km + 723 otras
+  formaciones: 159 valles, 64 montes, 37 plana, 34 pateras...). Verificado
+  que entran Jezero (47.5 km), Gale (154 km), Olympus Mons, Hellas.
+- **Radio de la caja**: cráteres = diam/2 → grados (1°≈111.32 km)
+  corregido por cos(lat), recortado a [0.05, 0.5]°; resto de tipos 0.2°
+  fijo (los diámetros de planitiae/valles son de cuenca completa:
+  Hellas 2.299 km → una caja así no se puede analizar).
+- **Convenio de longitudes**: el Gazetteer trae 0-360 Este → a [-180, 180]
+  (`lon-360` si >180).
+- **Enriquecimiento** (`enriquecer`): por sitio, 1 búsqueda STAC por bbox
+  (cacheada) + `analizar_sitio(..., modo_tile='remoto')` + ODE
+  IRBTR4 limit=500 (cajas 0-360 con `utilidades.cajas_gds`, por si cruza
+  el meridiano 0). Resumible: solo procesa 'pendiente'.
+- **Política de cobertura: la MISMA que api.py** (relajada ≥ 50 %):
+  `confiable AND cobertura ≥ 0.5` para ser 'listo'; si no, 'sin_dtm' con
+  el motivo (p.ej. "cobertura 5% / píxeles válidos 99% < política 50%").
+  Si el tile cubre <90 % queda `nota` (mismo texto que `nota_cobertura`).
+- **Estados**: pendiente → listo | sin_dtm (no hay tile o cobertura
+  insuficiente) | error (otra causa). `reintentar [--todo]` devuelve a
+  pendiente.
+- **Ventana THEMIS**: [última obs − 31 días, última obs]; en `mediciones`
+  van SOLO los productos de la ventana (id, fecha, hora solar). En
+  `sitios.themis_n_obs` queda el total de la caja como metadato de
+  disponibilidad.
+- **SQLite**: `data/db/sitios_marte.db` (data/ gitignored, como las
+  cachés). Tabla `sitios` + tabla `mediciones` PK(sitio_id, producto_id).
+  Hilos 2-3 máx con lock de escritura (conexión por transacción).
+- **Salida** (`sitios_disponibles`): dicts con `resumen` de EXACTAMENTE
+  las claves del registro del proyecto (elevacion_media_m,
+  pendiente_media_grados, rugosidad_media_m, n_puntos_lola=píxeles,
+  via_topografia='dtm_mro') + `topografia_extra` + `mediciones` (metadatos
+  de la ventana). Los consumidores enchufan `resumen` tal cual.
+
+### 17.3 Medido (sesión 4)
+
+| Paso | Tiempo | Resultado |
+|---|---|---|
+| `indexar` (Gazetteer completo) | 1.6 s | 2.100 filas → 1.133 sitios |
+| Lote 6 sitios, 2 hilos | 11.8 s | 1 listo, 5 sin_dtm (cajas al azar del ecuador: los DTM CTX/HiRISE cubren ~5 % de Marte) |
+| Lote 8 sitios siguientes | 2.6 s | 0 listo, 8 sin_dtm (sin tile: fallo rápido, no hay red de más) |
+| Jezero directo (`_enriquecer_sitio`) | ~10 s | listo: 20.2 m/px, cobertura 97.5 %, 231 obs THEMIS, 2 en ventana 2026-01-27..02-27 |
+| End-to-end DB→`obtener_datos_sitio` | 0.7 s (tile en caché) | NÚMEROS IDÉNTICOS (elev -2599.497, pend 2.374) y mismo tile → la DB es un menú válido |
+
+- La proporción 'sin_dtm' es ALTA (~90 % en los primeros lotes): es la
+  cobertura real de los DTM controlados del MRO. Por eso la DB es útil:
+  evita que el usuario pruebe caja tras caja sin datos.
+- `enriquecer --max 1200 --hilos 2` corriendo al finalizar esta sesión
+  (~1.124 sitios, ~11 s/sitio ÷ 2 hilos ≈ 90 min). Es resumible: si se
+  corta, se repite el comando y continúa.
+
+### 17.4 Soporte tocado en esta sesión
+
+- `topografia_dtm.analizar_sitio(..., modo_tile='remoto')`: NO descarga
+  el tile; abre `/vsicurl/{url}` y lee solo la ventana. Verificado contra
+  el tile bajado: mismos números. `out['acceso']='remoto (vsicurl)'`.
+- `pds.ode_products`: lee `Observation_time`/`Solar_time` y saca el id de
+  `FilesURL?product_id=` (`_id_de_url`) — los PDS4 venían con id/fecha
+  nulos.
+- `db_sitios_marte.py`: NUEVO módulo (indexar/enriquecer/listar/
+  reintentar/estado, CLI incluido).

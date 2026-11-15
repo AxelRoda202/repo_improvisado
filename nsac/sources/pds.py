@@ -184,10 +184,18 @@ def ode_products(
         "error": data.get("Error"),
         "products": [
             {
-                "id": p.get("Id"),
+                # 'Id' existe en los productos PDS3 pero es None en los PDS4
+                # (p.ej. THEMIS IRBTR4): en esos casos el identificador se
+                # extrae de la URL de ficheros (product_id=i98521009btr).
+                "id": p.get("Id") or _id_de_url(p.get("FilesURL")),
+                # 'Start_time' es PDS3; los PDS4 traen Observation_time (el
+                # punto medio entre inicio y fin de la observación) y
+                # Solar_time (hora local solar: util para día/noche).
+                "start_time": p.get("Start_time") or p.get("Observation_time"),
+                "observation_time": p.get("Observation_time"),
+                "solar_time": p.get("Solar_time"),
                 "center_lat": p.get("Center_latitude"),
                 "center_lon": p.get("Center_longitude"),
-                "start_time": p.get("Start_time"),
                 "data_url": p.get("External_url") or p.get("Data_url"),
                 "files_url": p.get("FilesURL"),
                 "footprint": p.get("Footprint_C0_geometry"),
@@ -195,6 +203,15 @@ def ode_products(
             for p in products
         ],
     }
+
+
+def _id_de_url(url: str | None) -> str | None:
+    """product_id de una URL de ficheros de ODE (p.ej. i98521009btr)."""
+    if not url:
+        return None
+    import re
+    m = re.search(r"product_id=([A-Za-z0-9_]+)", url)
+    return m.group(1) if m else None
 
 
 # ----------------------------------------------------------------- 4. GDS REST
