@@ -168,7 +168,7 @@ def datos_superficie_tierra(lat: float, lon: float, radio: float,
         escena = _escena(lat, lon, radio)
         if escena is None:
             seccion["nota"] = ("sin escena Sentinel-2 con pocas nubes que "
-                               "cuba esta caja en los últimos días")
+                               "cubra esta caja en los últimos días")
             return seccion
         props = escena.get("properties", {})
         seccion["escena"] = {

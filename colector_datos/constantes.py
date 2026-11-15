@@ -70,6 +70,16 @@ SITIOS = {
         "cuerpo": "marte", "lat": -4.59, "lon": 137.44, "radio": 0.5,
         "nota": "Cráter Gale: sitio del rover Curiosity, monte Sharp.",
     },
+    "atacama": {  # desierto de Atacama, análogo marciano clásico
+        "cuerpo": "tierra", "lat": -24.08, "lon": -69.47, "radio": 0.05,
+        "nota": "Desierto de Atacama: hiperárido, altura y UV extrema — "
+                "el análogo terrestre clásico de Marte.",
+    },
+    "death_valley": {  # Death Valley, California: calor extremo
+        "cuerpo": "tierra", "lat": 36.5, "lon": -117.1, "radio": 0.1,
+        "nota": "Death Valley: extremos térmicos y aridez, análogo de "
+                "las llanuras marcianas calientes.",
+    },
 }
 
 # ---------------------------------------------------------------------------
