@@ -240,7 +240,16 @@ def gds_query(
     }
     raw = get_json(GDS, params=params, timeout=300)  # GDS puede tardar minutos
     body = raw["GDSResults"]
-    files = body.get("ResultFiles", {}).get("ResultFile", [])
+    # El GDS, cuando falla o no encuentra nada, responde con 'ResultFiles'
+    # como STRING (p.ej. 'No results found...'), no como objeto/ausente:
+    # detectarlo y convertirlo en error claro (y no un 'str' object has no
+    # attribute get' críptico río abajo).
+    resultado_archivos = body.get("ResultFiles", {})
+    if isinstance(resultado_archivos, str):
+        raise RuntimeError(
+            "GDS sin archivos de resultados para esta consulta "
+            f"(respuesta del servidor: {resultado_archivos[:200]!r})")
+    files = resultado_archivos.get("ResultFile", [])
     if isinstance(files, dict):
         files = [files]
     return {

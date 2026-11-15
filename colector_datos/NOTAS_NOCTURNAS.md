@@ -261,6 +261,13 @@ Lectura honesta:
 - En ESTE dispositivo no había `rasterio` ni la carpeta `data/` (registro y
   caché viven fuera del repo). Instalado `rasterio` 1.4.4 (pip, Python 3.11).
   La caché/registro se reconstruyeron solos al correr.
+- **`nsac/sources/pds.py` endurecido:** la primera línea base LOLA del sitio
+  medio falló con `'str' object has no attribute 'get'`. Causa: cuando el
+  GDS tiene un percance transitorio (repitido segundos después y funcionó),
+  responde con `ResultFiles` como STRING, y `gds_query` casca críptico.
+  Ahora esa respuesta se convierte en `RuntimeError` con el texto del
+  servidor (y la caché no guarda basura). Lección #2: los fallos de API
+  también hay que probarlos; el mensaje de error ES parte del producto.
 
 ## 6. Las 2 pruebas DTM pendientes (§3.3 de la primera noche)
 
@@ -369,19 +376,26 @@ Mismo sitio (luna -23.4, 157.8, ±0.05°), tres corridas reales:
   puntos dispersos) no son 1:1. Smythii es una mare llana: 0 vs 1 es el
   ruido del umbral. Ver §9.2 para el caso que sí muerde.
 
-### 9.2 DTM vs LOLA en el sitio medio (41.2, -23.7): OJO, Δ elevación 102 m
+### 9.2 DTM vs LOLA en el sitio medio (41.2, -23.7): OJO, Δ elevación ~100 m
 
-| Métrica | DTM (19.4 m) | LOLA (primera noche) | Δabs | Δrel |
+| Métrica | DTM (19.4 m) | LOLA (GDS, este dispositivo) | Δabs | Δrel |
 |---|---|---|---|---|
-| Elevación media (m) | -2491.47 | -2389.3 | 102.2 | 4.3 % |
-| Pendiente media (°) | 1.12 | 0.442 | 0.68 | — |
-| Rugosidad media (m) | 0.53 | 0.905 | 0.38 | — |
+| Elevación media (m) | -2491.47 | -2389.30 | 102.2 | 4.3 % |
+| Pendiente media (°) | 1.120 | 0.442 | 0.68 | — |
+| Rugosidad media (m) | 0.530 | 0.905 | 0.38 | — |
 | Muestras | 24.336 px | 790 puntos | — | — |
+| Candidatos cráter | 0 | 2 | — | — |
 
-- En Smythii ambas fuentes coincidían al 0.5 %; aquí difieren un 4.3 %.
-  Hipótesis más plausible: los 790 puntos LOLA están agrupados en las
-  huellas de las órbitas y pueden quedar sesgados hacia una ladera si la
-  caja pisa un gradiente; el DTM muestrea TODO el terreno uniformemente.
+*(la línea base LOLA se midió en este dispositivo con `usar_dtm=False`:
+16.5 s totales, 790 puntos, y coincide EXACTO con la primera noche en el
+otro dispositivo: -2389.3 / 0.442 / 0.905 — el GDS es determinista).*
+
+- En Smythii ambas fuentes coincidían al 0.5 %; aquí difieren ~100 m
+  (4.2 %). Hipótesis más plausible: los puntos LOLA están agrupados en
+  las huellas de las órbitas y pueden quedar sesgados hacia una ladera
+  si la caja pisa un gradiente; el DTM muestrea TODO el terreno
+  uniformemente. La dispersión DTM dentro de la caja es std 6.2 m, así
+  que la diferencia NO es ruido: es dónde se posaron los puntos.
 - Lectura operativa idéntica en ambas fuentes (mare llano, pendiente
   mínima). Decisión propuesta para mañana: en el informe, la vía DTM es
   la fuente de elevación/pendiente/rugosidad cuando cubre, y la vía LOLA
@@ -389,13 +403,38 @@ Mismo sitio (luna -23.4, 157.8, ±0.05°), tres corridas reales:
   prefiere conservadorismo histórico). NO mezclar cifras de ambas vías en
   un mismo número.
 
+### 9.3 Corrida D — fallback polar real (Malapert, luna -85.9, 0.7, ±0.1°)
+
+- **Total: 134.5 s** (Diviner + LOLA fríos en paralelo; el reloj marca la
+  GDS más lenta).
+- El flujo completo funcionó como diseñado: DTM encadenado al STAC →
+  tile ya en disco (0 s) → cobertura 1.0 pero **píxeles válidos 1.2 %** →
+  rechazado por la política → aviso "fallback a GDS LOLA" → LOLA frío
+  corrió y dio la topografía.
+- Resultado vía LOLA: elev media **+4887.2 m** (macizo Malapert, orden de
+  magnitud correcto: es una de las mayores alturas del polo sur),
+  pendiente media 13.4° (terreno empinado de macizo).
+- Dato extra: el catálogo Treks POLAR trae 490 capas (vs 1.096 de la
+  proyección eq) — distinto catálogo, distinta caché, correcto.
+- **Veredicto: el fallback funciona de punta a punta y el DTM no engaña
+  en polos.** La consulta polar NO se ahorra el GDS LOLA (correcto: es
+  justo donde el DTM no es fiable), pero SÍ lo evita en todo sitio
+  ecuatorial/medio (corridas A/B/C).
+
+### 9.4 Resumen final de la noche (5 escenarios medidos)
+
+| Escenario | Tiempo | Topografía | GDS LOLA consultado |
+|---|---|---|---|
+| Frío clásico (usar_dtm=False), Smythii | 41.3 s | LOLA | Sí |
+| Tibio completo, Smythii | 4.2 s | DTM | No |
+| Frío sitio NUEVO (DTM cubre), sitio medio | 33.0 s | DTM | **No (0 llamadas)** |
+| Frío POLAR (DTM rechazado), Malapert | 134.5 s | LOLA (fallback) | Sí |
+| Tibio polar (todo caché) | ~10-12 s | LOLA | No (caché) |
+
 ## 10. Pendiente para mañana (decisión de Axel)
 
-1. Corrida D (fallback polar real vía `obtener_datos_sitio`): en vuelo al
-   momento de escribir esto; resultado en §9.3.
-2. Línea base LOLA del sitio medio (41.2,-23.7) EN ESTE dispositivo, para
-   completar la tabla §9.2 con una medición propia (la de arriba usa la
-   cifra de la primera noche).
+1. ~~Corrida D (fallback polar real)~~ → HECHA, ver §9.3.
+2. ~~Línea base LOLA del sitio medio~~ → HECHA, ver §9.2 (tabla actualizada).
 3. Merge a `master`: la rama `dtm-rasterio` ahora contiene D+E+cache de
    catálogos+integración A con fallback verificado. Todo aditivo y
    reversible (usar_dtm=False restaura el comportamiento de antes).
