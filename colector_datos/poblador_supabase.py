@@ -278,7 +278,15 @@ def poblar(lote: int = TAMANO_LOTE, simular: bool = False,
             _aviso(f"  lote {i // lote + 1}: +{len(bloque)} "
                    f"(total {subidos}/{len(filas)})")
         except Exception as exc:
-            errores.append(f"lote {i // lote + 1}: {str(exc)[:200]}")
+            texto = str(exc)[:200]
+            # Diagnóstico del fallo más común (panel con RLS activada):
+            # 42501 = "row-level security policy" -> la key NO salta RLS,
+            # es decir, se usó la anon/publishable en vez de la service_role.
+            if "42501" in texto or "row-level security" in texto:
+                texto += (" | la key no salta RLS: usa la SERVICE_ROLE key "
+                          "del panel (Settings -> API, la 'service_role'/"
+                          "'secret', NO la anon/publishable) en SUPABASE_KEY")
+            errores.append(f"lote {i // lote + 1}: {texto}")
     return {"subidos": subidos, "total": len(filas),
             "errores": errores,
             "segundos": round(__import__("time").perf_counter() - t0, 1)}
