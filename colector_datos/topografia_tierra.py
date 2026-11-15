@@ -82,8 +82,14 @@ def url_tile(lat: float, lon: float, resolucion: str = "30m") -> str:
 
 
 def analizar_sitio(lat: float, lon: float, radio: float,
-                   modo_tile: str = "descargar", aviso=None) -> dict[str, Any]:
+                   modo_tile: str = "descargar", aviso=None,
+                   resolucion: str = "30m") -> dict[str, Any]:
     """Topografía terrestre de UN sitio, mismo formato que la vía DTM lunar.
+
+    resolucion: '30m' (GLO-30, ~30 m/px, tile de 30-50 MB) o '90m'
+      (GLO-90, tile de ~4-5 MB: la descarga en frío es ~10x más rápida, a
+      cambio de menos detalle en pendiente/rugosidad). La comparativa
+      medida vive en `prueba_tierra_glo90.py` y en NOTAS_NOCTURNAS.md.
 
     Devuelve (NUNCA lanza; los fallos van en 'error'):
       fuente, via='glo30', elevacion/pendiente/rugosidad (formato
@@ -99,8 +105,10 @@ def analizar_sitio(lat: float, lon: float, radio: float,
             aviso(msg)
 
     out: dict[str, Any] = {
-        "fuente": "Copernicus DEM GLO-30 (AWS público) vía rasterio",
+        "fuente": (f"Copernicus DEM GLO-{resolucion[:-1]} "
+                   "(AWS público) vía rasterio"),
         "cuerpo": "earth",
+        "resolucion": resolucion,
     }
     try:
         # --- caja (puede cruzar el antimeridiano: se parte como el GDS) ---
@@ -114,8 +122,12 @@ def analizar_sitio(lat: float, lon: float, radio: float,
         # en la vía lunar, y se reporta con cobertura < 1).
         out["stac_s"] = 0.0   # sin catálogo: el nombre del tile es determinista
         tile_id = tile_name(lat, lon)
+        if resolucion == "90m":
+            # Prefijo/nombre real del bucket GLO-90 (COG_30) + sufijo de
+            # caché para NO confundir tiles de 30 y de 90 m en disco.
+            tile_id = tile_id.replace("COG_10", "COG_30") + "_90m"
         out["tile"] = tile_id
-        url = url_tile(lat, lon)
+        url = url_tile(lat, lon, resolucion)
         out["url"] = url
 
         # --- descarga (con reutilización local, igual que la vía lunar) ---
@@ -133,7 +145,7 @@ def analizar_sitio(lat: float, lon: float, radio: float,
             out["de_cache"] = True
         else:
             from nsac import http
-            _aviso(f"bajando tile GLO-30 ({tile_id}, ~30-50 MB)...")
+            _aviso(f"bajando tile GLO-{resolucion[:-1]} ({tile_id})...")
             t0 = time.perf_counter()
             try:
                 http.download(url, ruta_tif)
@@ -143,8 +155,9 @@ def analizar_sitio(lat: float, lon: float, radio: float,
                 # completamente marinos). Mensaje claro en vez del 404.
                 if "404" in str(exc):
                     out["error"] = (
-                        f"sin tile GLO-30 para {tile_id}: no existe en el "
-                        "bucket (típico de un sitio en mar abierto)")
+                        f"sin tile GLO-{resolucion[:-1]} para {tile_id}: no "
+                        "existe en el bucket (típico de un sitio en mar "
+                        "abierto)")
                 else:
                     out["error"] = f"descarga falló: {exc}"
                 return out
@@ -224,7 +237,11 @@ def analizar_sitio(lat: float, lon: float, radio: float,
             float(pend.max()), float(pend.std()))
         out["pendiente"]["n_pixeles"] = int(pend.size)
 
-        paso_r = max(1, int(round(100.0 / max(dx_m, 1e-6))))
+        # Rugosidad: celdas de ~100 m. OJO: si el DEM es más grueso que la
+        # celda (GLO-90: ~89 m/px), una celda de 100 m contiene 1 píxel y su
+        # std es 0 (rugosidad falsa "lisa"): mínimo 2 píxeles por lado y el
+        # tamaño real queda reportado en tamano_celda_m.
+        paso_r = max(2, int(round(100.0 / max(dx_m, 1e-6))))
         h = (z.shape[0] // paso_r) * paso_r
         w = (z.shape[1] // paso_r) * paso_r
         if h >= paso_r and w >= paso_r:
