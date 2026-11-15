@@ -51,7 +51,8 @@ colector_datos/
   constantes.py        constantes físicas, sitios de ejemplo, palabras clave
   utilidades.py        pendiente, rugosidad, cráteres, distancias, estadísticas
   topografia.py        elevación LOLA (GDS), catálogo DTM (STAC), capas Treks
-  topografia_dtm.py    EXPERIMENTO A: topografía desde el DTM Kaguya (rasterio)
+  topografia_dtm.py    EXPERIMENTO A: topografía desde DTM (Kaguya en Luna,
+                       CTX/HiRISE en Marte) con rasterio
   termico.py           Diviner: temperatura + día/noche + estacional + albedo
   superficie.py        tipo de roca, minerales, polvo/regolito
   iluminacion.py       iluminación, energía solar, PSR
@@ -91,7 +92,32 @@ datos = obtener_datos_sitio(
     con_teselas=True,        # URLs WMTS listas para Leaflet/MapLibre (+llamadas)
     incluir_tierra=True,     # sección de datos terrestres (~6 llamadas más)
 )
+
+# MARTE: mismas secciones y MISMAS claves que la Luna, para comparar cuerpos.
+datos = obtener_datos_sitio(cuerpo="marte", lat=18.38, lon=77.58, radio=0.5)
+datos["topografia"]["elevacion_m"]["media"]   # -2377.9 (piso del cráter Jezero)
+datos["topografia"]["via"]                    # 'dtm_mro' (DTM CTX vía rasterio)
 ```
+
+## Marte (qué fuente trae cada parámetro)
+
+Marte NO tiene LOLA ni Diviner (instrumentos de la LRO, lunar). El colector
+usa las fuentes marcianas equivalentes y devuelve el MISMO formato de
+diccionario:
+
+| Parámetro | Fuente marciana | Nota |
+|---|---|---|
+| Elevación / pendiente / rugosidad / cráteres | **DTM de MRO CTX/HiRISE** (USGS STAC, tile GeoTIFF vía rasterio, ~20 m/px) | Misma receta que el DTM Kaguya lunar; CRS marciana IAU_2015:499xx (equirectangular en metros) resuelta con la fórmula manual. Política de cobertura ≥50 % (sin fallback GDS: en Marte no existe LOLA) y `nota_cobertura` cuando el tile no cubre todo |
+| Temperatura | **Ninguna puntual**: capas THEMIS/TES de Mars Trek + instrucciones de PDS ODE | No hay servicio tipo GDS marciano (verificado: los presets `mola*`/`themisrdr`/`mgs_tes` del GDS lunares son rechazados con 'include a query type') |
+| Minerales / superficie | capas Mars Trek (CRISM/Ω/TES) | mismo formato `superficie` que la Luna |
+| Iluminación / energía solar | capas Mars Trek + cálculo local | mismo formato `iluminacion` |
+| `resumen` del registro | idénticas claves, `via_topografia='dtm_mro'` | comparación Luna↔Marte directa |
+
+Sitios marcianos con DTM controlado en el STAC: **Jezero** (y demás zonas de
+misión cubiertas por los DTMs controlados de CTX/HiRISE). Sitios SIN tiles
+(p.ej. Gale): la sección topográfica queda en catálogos con
+`nota_elevacion` explicando cómo descargar el DTM de PDS ODE — nunca se
+inventan números.
 
 ## Detalles de diseño (por qué está hecho así)
 
@@ -105,10 +131,13 @@ datos = obtener_datos_sitio(
    elevación/pendiente/rugosidad/cráteres sobre una malla de 19-30 m/px en
    segundos; el GDS LOLA (que el servidor fabrica a mano alzada, minutos) solo
    se consulta si el DTM no cubre la caja (típico en polos: huecos de sombra).
+   En **Marte** es la única fuente puntual (no existe LOLA): DTMs de
+   CTX/HiRISE a ~20 m/px con la misma receta y el mismo formato.
    La política exacta y sus mediciones están en `NOTAS_NOCTURNAS.md`.
 3. **Paralelismo:** en consultas lunares, catálogo Treks + Diviner + STAC + DTM
-   (o LOLA) se lanzan juntos en un `ThreadPoolExecutor(4)`; el total es el de
-   la llamada más lenta, no la suma.
+   (o LOLA) se lanzan juntos en un `ThreadPoolExecutor(4)`; en Marte, Treks +
+   STAC + análisis DTM en un pool de 3. El total es el de la llamada más
+   lenta, no la suma.
 4. **Tres cachés locales** (datos históricos: re-bajarlos da lo mismo):
    `cache_gds.py` (CSV de Diviner/LOLA), `cache_catalogo.py` (Treks/STAC) y
    los tiles DTM en `data/cache/dtm/`. Primera visita = red; siguientes =
@@ -188,6 +217,8 @@ La ruta se cambia con la variable de entorno `NSAC_DATA_DIR` (por defecto
   política de cobertura rechaza el resto — ver NOTAS_NOCTURNAS.md).
 - En Marte no existen LOLA/Diviner: la temperatura puntual requiere descargar
   productos THEMIS/TES de PDS ODE (el módulo lo anota y da las capas Treks).
+  La elevación puntual solo existe donde el STAC tiene DTM controlado
+  (Jezero sí; Gale no): los demás sitios quedan con `nota_elevacion`.
 - La detección de cráteres (malla o nube de puntos) es una **heurística de
   cribado**; para confirmar cráteres usa el mapa geológico USGS.
 - `tipo_roca` es una clasificación por umbral de albedo (anortosita/basalto);

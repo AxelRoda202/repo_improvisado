@@ -1,12 +1,15 @@
 """topografia_dtm.py — EXPERIMENTO A (rama `dtm-rasterio`): topografía desde
-el DTM de Kaguya (GeoTIFF) en vez de la nube de puntos de LOLA (GDS).
+un DTM (GeoTIFF) en vez de la nube de puntos de LOLA (GDS). Funciona para
+LUNA (DTM Kaguya TC) y para MARTE (DTM de CTX/HiRISE del MRO).
 
 POR QUÉ: el GDS tarda minutos porque el servidor fabrica el CSV a mano alzada
 punto por punto. Los DTMs de Kaguya Terrain Camera (USGS Astrogeology) son
 GeoTIFFs de ~7 MB en un S3 estático: se descargan en segundos y la lectura es
 un trozo de matriz (window read), no una consulta pesada. Resolución real
 19-30 m/px (según el tile), muy superior a la separación típica de los puntos
-LOLA crudos.
+LOLA crudos. En MARTE es MÁS importante todavía: no existe LOLA, así que el
+DTM de CTX (~20 m/px, verificado en Jezero) es la ÚNICA fuente de elevación
+puntual sin descargar productos grandes de PDS ODE.
 
 QUÉ CALCULA (mismas métricas que la vía GDS, en el MISMO formato, para poder
 comparar y para que `api.py` las enchufe sin adaptación):
@@ -23,9 +26,22 @@ comparar y para que `api.py` las enchufe sin adaptación):
 
 FALLBACK: si no hay tile DEM que cubra la caja, si los píxeles válidos son
 menos de la mitad o si `rasterio` no está instalado, se devuelve un dict con
-`fallback="lolardr"` y `api.py` usa la vía GDS de siempre. Este módulo y
-`topografia.py` conviven: no se sustituye a LOLA a la fuerza, se elige por
-calidad de cobertura.
+`fallback="lolardr"` y `api.py` usa la vía GDS de siempre (SOLO en la Luna:
+en Marte no hay LOLA, y ahí el fallback es quedarse sin elevación puntual,
+con la nota de siempre y las capas Treks). Este módulo y `topografia.py`
+conviven: no se sustituye a LOLA a la fuerza, se elige por calidad de
+cobertura.
+
+CRS (lo que más pega con los rasters no terrestres):
+  - Los tiles KAGUYA (Luna) son GEOGRÁFICOS: CRS IAU_2015:30100 ('Moon
+    (2015) Sphere / Ocentric'), coordenadas en GRADOS. OJO: EPSG:4326
+    significa LA TIERRA y PROJ se niega a mezclar Tierra con otros cuerpos.
+  - Los tiles CTX/HiRISE (Marte, ecuador) son PROYECTADOS equirectangulares
+    en METROS (IAU_2015:499xx, 'Mars (2015) Sphere / Ocentric /
+    Equirectangular, clon=N'). Verificado en Jezero: la fórmula manual
+    x = R·(λ-λ0)·cos(φ1) / y = R·φ (y su inversa) da el bbox exacto.
+  - Si una instalación de PROJ trae la base IAU completa, el warp de
+    rasterio se usa de preferencia; si no, cae la fórmula manual.
 
 Solo se toca la red 2 veces: 1 POST al STAC (metadatos, cacheado) + 1 GET
 del TIFF (guardado en data/cache/dtm/, datos históricos como la caché GDS).
@@ -33,14 +49,28 @@ del TIFF (guardado en data/cache/dtm/, datos históricos como la caché GDS).
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 from typing import Any
 
 from . import constantes, topografia
 
-# Radio lunar medio (IAU): para convertir arco en superficie en metros.
-RADIO_LUNA_M = 1_737_400.0
+# Radios de referencia IAU (metros): convierten arco (grados) en metros.
+# La Luna usa el RADIO_DATUM de constantes (datum LOLA); Marte, el aro del
+# datum areoide. Las dos funciones de conversión grados<->metros dependen de
+# este número, así que va elegido por `cuerpo` en un único sitio.
+RADIOS_DE_DATUM = {
+    "moon": constantes.RADIO_DATUM_LUNA_M,
+    "mars": constantes.RADIO_DATUM_MARTE_M,
+}
+
+# Sufijos de asset que indican 'esto es un raster de elevación'. Los tiles
+# de Kaguya terminan en '-dem.tif' y los de CTX/HiRISE en '_dtm.tif'
+# (verificado contra el STAC real de los dos cuerpos); los items que apuntan
+# a nubes de puntos `.copc.laz` (LOLA) o a mosaicos de imagen THEMIS se
+# quedan fuera con este filtro.
+SUFIJOS_DEM_TIF = ("-dem.tif", "_dtm.tif")
 
 # Carpeta donde se guardan los TIFFs descargados (el .gitignore excluye
 # data/, y los tiles se reutilizan como la caché del GDS: son históricos).
@@ -67,23 +97,25 @@ def _a_estadisticas(n: int, vmin: float, media: float, mediana: float,
 
 
 def _tile_dem_para(bbox_stac: tuple, lat: float, lon: float,
-                   items: list[dict] | None = None) -> dict[str, Any] | None:
+                   items: list[dict] | None = None,
+                   cuerpo: str = "moon") -> dict[str, Any] | None:
     """Del catálogo STAC, elige el tile DEM (GeoTIFF) que cubra la caja.
 
     `dtm_disponibles` ya habla con el STAC (y ahora lo cachea); si el
     llamador trae esos items (`items`), se reutilizan y no se repite la
     llamada. Filtramos los que son TIFF de elevación (los items de LOLA
-    apuntan a nubes `.copc.laz` de 100+ MB: descartados).
+    apuntan a nubes `.copc.laz` de 100+ MB y los THEMIS a mosaicos de
+    imagen: descartados — ver SUFIJOS_DEM_TIF).
 
     Con bbox en los items, gana el tile que CONTIENE el centro de la caja;
     si ninguno lo contiene, el de mayor solape con la caja. Sin bbox
     (formato antiguo), cae al primer tif como antes.
     """
     if items is None:
-        items = topografia.dtm_disponibles("moon", bbox_stac, lat)
+        items = topografia.dtm_disponibles(cuerpo, bbox_stac, lat)
 
     tifs = [it for it in items
-            if str(it.get("url_mejor_asset", "")).lower().endswith("-dem.tif")]
+            if str(it.get("url_mejor_asset", "")).lower().endswith(SUFIJOS_DEM_TIF)]
     if not tifs:
         return None
 
@@ -106,12 +138,14 @@ def _tile_dem_para(bbox_stac: tuple, lat: float, lon: float,
     return max(con_bbox, key=_solape)
 
 
-def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
+def _metros_por_pixel(transform, crs, lat_centro: float,
+                      radio_m: float) -> tuple[float, float]:
     """Tamaño REAL en metros de un píxel del raster (dx, dy).
 
-    Si el CRS es proyectado (p.ej. estereográfico polar), el transform ya va
-    en metros. Si es geográfico (grados), hay que multiplicar por el radio
-    lunar y el coseno de la latitud (los meridianos se juntan hacia el polo).
+    Si el CRS es proyectado (equirectangular marciano o estereográfico
+    polar), el transform ya va en metros. Si es geográfico (grados), hay
+    que multiplicar por el radio del cuerpo y el coseno de la latitud (los
+    meridianos se juntan hacia el polo).
     """
     import numpy as np
 
@@ -124,14 +158,14 @@ def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
     #   van juntando hacia el polo)
     dx_grados = abs(transform.a)
     dy_grados = abs(transform.e)
-    arc_por_grado = 3.141592653589793 * RADIO_LUNA_M / 180.0
+    arc_por_grado = 3.141592653589793 * radio_m / 180.0
     dx_m = dx_grados * arc_por_grado * np.cos(np.radians(lat_centro))
     dy_m = dy_grados * arc_por_grado
     return float(dx_m), float(dy_m)
 
 
 def _crateres_de_malla(z, z_transform, fila0: int, col0: int, crs,
-                       dx_m: float, sigma: float = 1.5,
+                       dx_m: float, radio_m: float, sigma: float = 1.5,
                        celda_m: float = 200.0,
                        radio_busqueda_m: float = 500.0) -> dict[str, Any]:
     """Detección APROXIMADA de cráteres sobre la malla regular del DTM.
@@ -230,21 +264,33 @@ def _crateres_de_malla(z, z_transform, fila0: int, col0: int, crs,
         offset="center")
 
     # (x, y) están en la CRS del tile. Geográfica = (lon, lat) directamente;
-    # proyectada (polos) = transformamos a la geográfica LUNAR IAU_2015:30100.
+    # proyectada = al geo del cuerpo: primero con PROJ (vale si la base IAU
+    # está instalada), y si no, con la fórmula manual de la equirectangular
+    # (x = R·(λ-λ0)·cos(φ1), y = R·φ) que es EXACTA para los tiles eqc de
+    # Marte y de la Luna (verificada en Jezero: inversa con error < 1e-4°).
     xs_a = np.atleast_1d(np.asarray(xs, dtype="float64"))
     ys_a = np.atleast_1d(np.asarray(ys, dtype="float64"))
     if crs is not None and crs.is_geographic:
         lons, lats = xs_a, ys_a
     else:
+        lons = np.full(xs_a.shape, np.nan)
+        lats = np.full(xs_a.shape, np.nan)
         try:
             import rasterio.warp
+            geo = "IAU_2015:30100" if radio_m < 3e6 else "IAU_2015:30000"
             lons_w, lats_w = rasterio.warp.transform(
-                crs, "IAU_2015:30100", xs_a.tolist(), ys_a.tolist())
+                crs, geo, xs_a.tolist(), ys_a.tolist())
             lons = np.atleast_1d(np.asarray(lons_w, dtype="float64"))
             lats = np.atleast_1d(np.asarray(lats_w, dtype="float64"))
         except Exception:
-            lons = np.full(xs_a.shape, np.nan)  # sin CRS lunar: sin lat/lon
-            lats = np.full(xs_a.shape, np.nan)
+            conv = crs.to_dict() if crs is not None else {}
+            if conv.get("proj") == "eqc":
+                clon = float(conv.get("lon_0", conv.get("central_meridian", 0.0)) or 0.0)
+                phi1 = float(conv.get("lat_ts", conv.get("standard_parallel", 0.0)) or 0.0)
+                cos1 = math.cos(math.radians(phi1)) or 1.0
+                lons = clon + np.degrees(
+                    xs_a / (radio_m * cos1))
+                lats = np.degrees(ys_a / radio_m)
 
     candidatos = []
     for i in orden:
@@ -263,12 +309,13 @@ def _crateres_de_malla(z, z_transform, fila0: int, col0: int, crs,
 
 def analizar_sitio(lat: float, lon: float, radio: float,
                    items_stac: list[dict] | None = None,
-                   aviso=None) -> dict[str, Any]:
-    """Piloto completo del experimento A para UN sitio lunar.
+                   aviso=None, cuerpo: str = "moon") -> dict[str, Any]:
+    """Piloto completo del experimento A para UN sitio (Luna o Marte).
 
     Pasos (cronometrados por separado):
-      1. STAC: elegir el tile Kaguya TC DEM que cubre la caja (items
-         precargados si el llamador ya hizo la búsqueda; si no, la hace).
+      1. STAC: elegir el tile DEM (Kaguya TC en la Luna, CTX/HiRISE en
+         Marte) que cubra la caja (items precargados si el llamador ya
+         hizo la búsqueda; si no, la hace).
       2. Descarga: bajar el GeoTIFF (~7 MB) a data/cache/dtm/ (si ya estaba,
          se salta la red).
       3. Cómputo: window read del trozo que interesa + pendiente + rugosidad
@@ -277,16 +324,26 @@ def analizar_sitio(lat: float, lon: float, radio: float,
     Devuelve un dict con métricas EN EL MISMO FORMATO que la vía GDS
     ('elevacion'/'pendiente'/'rugosidad' con claves n/min/max/media/...) +
     metadatos + tiempos + cobertura. NUNCA lanza: ante cualquier fallo
-    devuelve {'error': ..., 'fallback': 'lolardr'} para que `api.py` sepa
-    que debe usar la vía GDS.
+    devuelve {'error': ..., 'fallback': ...} ('lolardr' en la Luna; en
+    Marte 'sin_dato_puntual', porque no existe LOLA) para que `api.py`
+    sepa qué hacer.
     """
     import numpy as np
+
+    # Radio de datum del cuerpo (fallback a la Luna si el nombre es raro:
+    # los cuerpos que entran aquí solo son 'moon' y 'mars').
+    radio_m = RADIOS_DE_DATUM.get(cuerpo, RADIOS_DE_DATUM["moon"])
+    nombres_fuente = {
+        "moon": "Kaguya TC DTM (USGS STAC) vía rasterio",
+        "mars": "DTM MRO CTX/HiRISE (USGS STAC) vía rasterio",
+    }
 
     def _aviso(msg: str) -> None:
         if aviso:
             aviso(msg)
 
-    out: dict[str, Any] = {"fuente": "Kaguya TC DTM (USGS STAC) vía rasterio"}
+    out: dict[str, Any] = {"fuente": nombres_fuente.get(cuerpo, nombres_fuente["moon"]),
+                           "cuerpo": cuerpo}
     try:
         # --- caja en el convenio STAC (-180..180) -------------------------
         oeste = lon - radio
@@ -297,11 +354,11 @@ def analizar_sitio(lat: float, lon: float, radio: float,
 
         # --- 1) STAC (reutiliza items si el llamador ya los trajo) ---------
         t0 = time.perf_counter()
-        tile = _tile_dem_para(bbox_stac, lat, lon, items_stac)
+        tile = _tile_dem_para(bbox_stac, lat, lon, items_stac, cuerpo)
         out["stac_s"] = round(time.perf_counter() - t0, 1)
         if tile is None:
-            out["error"] = "sin tile Kaguya DEM (tif) que cubra la caja"
-            out["fallback"] = "lolardr"
+            out["error"] = (f"sin tile DEM (tif) de {cuerpo} que cubra la caja")
+            out["fallback"] = "lolardr" if cuerpo == "moon" else "sin_dato_puntual"
             return out
         out["tile"] = tile.get("id")
         out["url"] = tile.get("url_mejor_asset")
@@ -315,7 +372,7 @@ def analizar_sitio(lat: float, lon: float, radio: float,
             out["de_cache"] = True
         else:
             from nsac import http
-            _aviso(f"bajando tile Kaguya DEM ({tile.get('id')})...")
+            _aviso(f"bajando tile DEM ({tile.get('id')})...")
             t0 = time.perf_counter()
             http.download(tile["url_mejor_asset"], ruta_tif)
             out["descarga_s"] = round(time.perf_counter() - t0, 1)
@@ -327,37 +384,47 @@ def analizar_sitio(lat: float, lon: float, radio: float,
 
         t0 = time.perf_counter()
         with rasterio.open(ruta_tif) as src:
-            # Los tiles de la Luna usan CRS IAU (p.ej. 'Moon (2015) -
-            # Sphere / Ocentric / Equirectangular, clon = 180'), NO el
-            # EPSG:4326 terrestre. OJO: EPSG:4326 significa LA TIERRA y
-            # PROJ se niega a convertir Tierra<->Luna. La CRS de origen
-            # correcta es la geográfica LUNAR, IAU_2015:30100.
-            # Resaldo con la fórmula manual de la equirectangular por si
-            # una instalación de PROJ no trae la base IAU.
+            # Caja en grados -> coordenadas de la CRS del raster. Los tiles
+            # de la Luna usan CRS IAU geográfica ('Moon (2015) Sphere /
+            # Ocentric', IAU_2015:30100) y los de Marte PROYECTADAS
+            # equirectangulares en METROS (IAU_2015:499xx). OJO: EPSG:4326
+            # significa LA TIERRA y PROJ se niega a mezclar Tierra con
+            # otros cuerpos; por eso se parte de la geo del CUERPO y se
+            # resalda con la fórmula manual de la equirectangular
+            # (x = R·(λ-λ0)·cos(φ1), y = R·φ), verificada en Jezero.
             import rasterio.warp
+            geo_origen = ("IAU_2015:30100" if cuerpo == "moon"
+                          else "IAU_2015:30000")
             try:
                 xs, ys = rasterio.warp.transform(
-                    "IAU_2015:30100", src.crs, [oeste, este], [sur, norte])
+                    geo_origen, src.crs, [oeste, este], [sur, norte])
             except Exception:
-                # Equirectangular esférica: x = R·(λ-λ0)·cos(φ1) [radianes],
-                # y = R·φ. Vale para los tiles ecuatoriales; los polares
-                # (estereográficos) caerían al fallback GDS.
-                import math
                 conv = src.crs.to_dict()
-                clon = float(conv.get("central_meridian", 0.0) or 0.0)
-                phi1 = float(conv.get("standard_parallel", 0.0) or 0.0)
-                R = RADIO_LUNA_M
+                if conv.get("proj") == "eqc":
+                    # Equirectangular esférica manual (exacta para los
+                    # tiles eqc; los polares estereográficos no llegan
+                    # aquí: su proj es 'stere' y caen al fallback).
+                    clon = float(conv.get("lon_0",
+                                          conv.get("central_meridian", 0.0)) or 0.0)
+                    phi1 = float(conv.get("lat_ts",
+                                          conv.get("standard_parallel", 0.0)) or 0.0)
 
-                def _x(lon_v: float) -> float:
-                    rel = ((lon_v - clon + 180.0) % 360.0) - 180.0
-                    return (R * math.radians(rel)
-                            * math.cos(math.radians(phi1)))
+                    def _x(lon_v: float) -> float:
+                        rel = ((lon_v - clon + 180.0) % 360.0) - 180.0
+                        return (radio_m * math.radians(rel)
+                                * math.cos(math.radians(phi1)))
 
-                def _y(lat_v: float) -> float:
-                    return R * math.radians(lat_v)
+                    def _y(lat_v: float) -> float:
+                        return radio_m * math.radians(lat_v)
 
-                xs = [_x(oeste), _x(este)]
-                ys = [_y(sur), _y(norte)]
+                    xs = [_x(oeste), _x(este)]
+                    ys = [_y(sur), _y(norte)]
+                else:
+                    # Proyección no soportada sin PROJ-IAU (p.ej.
+                    # estereográfica polar): no hay forma segura de leer.
+                    raise RuntimeError(
+                        "CRS del tile no soportada sin base IAU de PROJ: "
+                        f"{conv.get('proj')}; usa las teselas DEM de Treks")
             izquierda, derecha = min(xs), max(xs)
             abajo, arriba = min(ys), max(ys)
 
@@ -402,10 +469,11 @@ def analizar_sitio(lat: float, lon: float, radio: float,
         # fallback LOLA en ese caso (comprueba 'confiable').
         out["confiable"] = out["pixeles_validos_fraccion"] >= 0.5
 
-        dx_m, dy_m = _metros_por_pixel(z_transform, crs, lat)
+        dx_m, dy_m = _metros_por_pixel(z_transform, crs, lat, radio_m)
         out["resolucion_m"] = round((dx_m + dy_m) / 2.0, 1)
 
-        # Elevación (m sobre el radio de referencia lunar), formato estándar.
+        # Elevación (m sobre el radio de referencia del cuerpo), formato
+        # estándar (el MISMO que la vía LOLA/GDS: consumidores intercambiables).
         out["elevacion"] = _a_estadisticas(
             validos,
             np.nanmin(z), np.nanmean(z), np.nanmedian(z),
@@ -449,7 +517,7 @@ def analizar_sitio(lat: float, lon: float, radio: float,
         # Cráteres/formaciones: heurística sobre la malla del DTM (grátis,
         # sin llamadas; los confirmados se verifican con el mapa geológico).
         out["crateres"] = _crateres_de_malla(z, z_transform, fila0, col0,
-                                             crs, dx_m)
+                                             crs, dx_m, radio_m)
 
         out["computo_s"] = round(time.perf_counter() - t0, 1)
         out["total_s"] = round(

@@ -28,8 +28,13 @@ Presupuesto de llamadas HTTP (Luna, caso normal, usar_dtm=True):
     (2 llamadas GDS LOLA) en paralelo con Diviner.
 
 En Marte no hay LOLA/Diviner (son instrumentos lunares): la topografía sale
-del STAC (DTM HiRISE/CTX) y el resto de capas del catálogo Mars Trek
-(2 llamadas + opcional `ode_products` de nsac para metadatos).
+del DTM de CTX/HiRISE del STAC vía rasterio (mismo formato de métricas, misma
+receta de tile GeoTIFF; política de cobertura relajada a >=50 % porque no
+existe GDS de respaldo), y el resto de parámetros de las capas de Mars Trek
+(térmico honesto: THEMIS/TES + instrucciones de descarga de ODE; no hay
+servicio de temperatura puntual). Presupuesto marciano: 2 llamadas de
+catálogo + 1 tile DTM (+2 por capa si con_teselas=True). Sitios sin tiles
+controlados (p.ej. Gale) quedan en catálogos con nota_elevacion.
 """
 
 from __future__ import annotations
@@ -77,24 +82,26 @@ def _dtm_de_stac(cuerpo: str, bbox_s: tuple, lat: float) -> tuple[Any, str]:
         return {"error": str(exc)}, "USGS STAC FALLÓ"
 
 
-def _dtm_encadenado(lat: float, lon: float, radio: float,
+def _dtm_encadenado(cuerpo: str, lat: float, lon: float, radio: float,
                     futuro_stac, aviso) -> dict[str, Any]:
     """Análisis DTM que ESPERA al futuro del STAC y reutiliza sus items.
 
     Se lanza al pool al mismo tiempo que la búsqueda STAC, pero no la
     repite: al llegar su turno hace .result() del futuro (que para entonces
     ya estará hecho o casi) y arranca con los items en la mano. Si el STAC
-    falló, devuelve un dict de error con fallback a la vía GDS.
+    falló, devuelve un dict de error con fallback (a la vía GDS en la Luna;
+    a 'sin dato puntual' en Marte, donde no existe LOLA).
     """
     try:
         items, _fuente = futuro_stac.result()
     except Exception as exc:
-        return {"error": f"STAC falló: {exc}", "fallback": "lolardr"}
+        return {"error": f"STAC falló: {exc}",
+                "fallback": "lolardr" if cuerpo == "moon" else "sin_dato_puntual"}
     if isinstance(items, dict) and "error" in items:
         return {"error": f"STAC falló: {items['error']}",
-                "fallback": "lolardr"}
+                "fallback": "lolardr" if cuerpo == "moon" else "sin_dato_puntual"}
     return topografia_dtm.analizar_sitio(lat, lon, radio, items_stac=items,
-                                         aviso=aviso)
+                                         aviso=aviso, cuerpo=cuerpo)
 
 
 def _aviso(aviso, mensaje: str) -> None:
@@ -314,11 +321,12 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             # items, sin repetir la llamada). El GDS LOLA NO se lanza: solo
             # se consultará como fallback si el DTM no cubre la caja.
             futuros["dtm"] = pool.submit(
-                _dtm_encadenado, lat, lon, radio, futuros["dtm_stac"], aviso)
+                _dtm_encadenado, cuerpo, lat, lon, radio,
+                futuros["dtm_stac"], aviso)
         else:
             futuros["lola"] = pool.submit(topografia.elevacion_lola, cajas_g)
-    elif cuerpo != "earth":
-        # Marte / pruebas sin GDS: el catálogo se baja en serie como siempre.
+    elif cuerpo not in ("earth", "mars"):
+        # Otros cuerpos (ninguno por ahora): el catálogo se baja en serie.
         capas_trek, fuente_trek = _capas_trek(cuerpo, projtype)
         resultado["metadatos"]["fuentes"].append(fuente_trek)
 
@@ -470,24 +478,97 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             capas_trek, res_div)
 
     # ==================================================================
-    # MARTE: sin LOLA/Diviner -> STAC (DTM) + capas Mars Trek
+    # MARTE: no hay LOLA ni Diviner (instrumentos lunares), pero la
+    # topografía sale del DTM de CTX/HiRISE del STAC (la misma receta del
+    # experimento A lunar: tile GeoTIFF de S3 estático, window read). El
+    # resto de parámetros salen de las capas de Mars Trek. TODO con el
+    # MISMO formato de diccionario que la Luna, para comparar cuerpos.
     # ==================================================================
     elif cuerpo == "mars":
+        from concurrent.futures import ThreadPoolExecutor
+
+        _aviso(aviso, "En paralelo: catálogo Treks + catálogo STAC + "
+               "análisis DTM (CTX/HiRISE)... (1ª vez: minutos; con caché: segs)")
+        pool = ThreadPoolExecutor(3)
+        futuros_m = {
+            "capas": pool.submit(_capas_trek, cuerpo, projtype),
+            "dtm_stac": pool.submit(_dtm_de_stac, cuerpo, bbox_s, lat),
+        }
+        # El análisis DTM se ENCADENA al futuro del STAC (reutiliza sus
+        # items, sin repetir la llamada) — el mismo patrón de la Luna.
+        futuros_m["dtm"] = pool.submit(
+            _dtm_encadenado, cuerpo, lat, lon, radio,
+            futuros_m["dtm_stac"], aviso)
+        capas_trek, fuente_trek = futuros_m["capas"].result()
+        resultado["metadatos"]["fuentes"].append(fuente_trek)
+        dtm_precargado, fuente_stac = futuros_m["dtm_stac"].result()
+        resultado["metadatos"]["fuentes"].append(fuente_stac)
+        res_dtm = futuros_m["dtm"].result()
+        pool.shutdown()
+
         pc = constantes.PALABRAS_CLAVE_CAPAS
 
-        topo: dict[str, Any] = {
-            "fuente": "DTM HiRISE/CTX (USGS STAC) + capas Mars Trek",
-            "nota_elevacion": ("La elevación puntual marciana requiere "
-                               "descargar un DTM (ver dtm_descargables) o "
-                               "leer las teselas DEM de Mars Trek."),
-        }
-        try:
-            _aviso(aviso, "Catálogo STAC de DTM (USGS)...")
-            topo["dtm_descargables"] = topografia.dtm_disponibles(
-                cuerpo, bbox_s, lat)
-            resultado["metadatos"]["fuentes"].append("USGS STAC (DTM)")
-        except Exception as exc:
-            topo["dtm_descargables"] = {"error": str(exc)}
+        # ¿El DTM marciano sirve? Política RELAJADA respecto a la Luna
+        # (cobertura >= 0.5): en Marte NO existe LOLA/GDS de respaldo, así
+        # que un tile que cubra la mitad de la caja sigue siendo LA única
+        # elevación puntual disponible. La cobertura queda anotada.
+        dtm_util = (usar_dtm and bool(res_dtm)
+                    and "error" not in res_dtm
+                    and res_dtm.get("confiable", False)
+                    and res_dtm.get("cobertura_fraccion", 0.0) >= 0.5)
+
+        if dtm_util:
+            topo: dict[str, Any] = {
+                "fuente": "DTM MRO CTX/HiRISE (USGS STAC) vía rasterio",
+                "via": "dtm_mro",
+                "elevacion_m": res_dtm["elevacion"],
+                "pendiente": res_dtm["pendiente"],
+                "rugosidad": res_dtm["rugosidad"],
+                "metodo_pendiente_rugosidad": (
+                    "gradiente sobre la malla del DTM "
+                    f"(~{res_dtm.get('resolucion_m')} m/píxel); rugosidad = "
+                    "desviación típica dentro de celdas de ~100 m (MISMA "
+                    "definición que la vía lunar, para comparar cuerpos)"),
+                "crateres_formaciones": res_dtm.get("crateres") or {},
+                "dtm_detalle": {
+                    "tile": res_dtm.get("tile"),
+                    "resolucion_m": res_dtm.get("resolucion_m"),
+                    "cobertura_fraccion": res_dtm.get("cobertura_fraccion"),
+                    "pixeles_validos_fraccion": res_dtm.get(
+                        "pixeles_validos_fraccion"),
+                    "tile_en_cache": res_dtm.get("de_cache"),
+                    "tiempos_s": {
+                        k: res_dtm.get(k) for k in
+                        ("stac_s", "descarga_s", "computo_s", "total_s")},
+                },
+            }
+            if topo["dtm_detalle"]["cobertura_fraccion"] < 0.9:
+                topo["nota_cobertura"] = (
+                    "el tile cubre el "
+                    f"{topo['dtm_detalle']['cobertura_fraccion'] * 100:.0f} % "
+                    "de la caja: las métricas describen esa fracción "
+                    "(no hay DTM más ancho disponible en el STAC)")
+            topo["crateres_formaciones"]["referencias"] = [
+                {"mapa_geologico_usgs": constantes.URL_MAPA_GEOLOGICO_MARTE},
+            ]
+            resultado["metadatos"]["fuentes"].append(
+                "DTM MRO CTX/HiRISE (rasterio) — elevación sin PDS ODE")
+        else:
+            # Sin DTM utilizable (Gale p.ej. no tiene tiles controlados):
+            # la sección queda en catálogos, con nota HONESTA de por qué.
+            if usar_dtm and res_dtm:
+                resultado["metadatos"]["fuentes"].append(
+                    f"DTM MRO DESCARTADO ({res_dtm.get('error')})")
+            topo = {
+                "fuente": "DTM HiRISE/CTX (USGS STAC) + capas Mars Trek",
+                "via": "catalogos",
+                "nota_elevacion": (
+                    "En este sitio no hay tile DEM (CTX/HiRISE controlado) "
+                    "que cubra la caja y no existe LOLA: la elevación "
+                    "puntual exige descargar un DTM de PDS ODE o leer las "
+                    "teselas DEM de Mars Trek (ver dtm_descargables)."),
+            }
+        topo["dtm_descargables"] = dtm_precargado
         topo["capas_trek"] = topografia.capas_topografia_trek(capas_trek)
         resultado["topografia"] = topo
 

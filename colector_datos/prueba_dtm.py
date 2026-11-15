@@ -25,18 +25,22 @@ def main() -> None:
     parser.add_argument("--lat", type=float, required=True)
     parser.add_argument("--lon", type=float, required=True)
     parser.add_argument("--radio", type=float, required=True)
+    parser.add_argument("--cuerpo", default="luna", choices=("luna", "marte"),
+                        help="cuerpo del sitio (por defecto: luna)")
     args = parser.parse_args()
+
+    cuerpo = "mars" if args.cuerpo == "marte" else "moon"
 
     def _aviso(msg: str) -> None:
         print(f"  · {msg}", flush=True)
 
     print("=" * 70)
-    print(f"EXPERIMENTO A — DTM Kaguya por rasterio  (luna {args.lat}, "
+    print(f"EXPERIMENTO A — DTM por rasterio  ({args.cuerpo} {args.lat}, "
           f"{args.lon}, ±{args.radio})")
     print("=" * 70)
 
     res = topografia_dtm.analizar_sitio(args.lat, args.lon, args.radio,
-                                        aviso=_aviso)
+                                        aviso=_aviso, cuerpo=cuerpo)
 
     if "error" in res:
         print(f"\nRESULTADO: FALLÓ -> {res['error']}")

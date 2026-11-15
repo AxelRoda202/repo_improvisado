@@ -465,8 +465,132 @@ otro dispositivo: -2389.3 / 0.442 / 0.905 — el GDS es determinista).*
 - Cráteres por segmentación del DTM (la heurística actual es de cribado:
   depresiones de >1.5σ; los candidatos de malla y de nube no son 1:1).
 - TTL opcional en los catálogos (hoy sin caducidad, como la caché GDS).
-- Elevación MARCIANA vía rasterio: los DTMs de HiRISE/CTX del STAC usan
-  la misma receta del piloto (CRS marciano IAU + window read); faltó
-  tiempo para probarla, y en Marte la elevación puntual hoy no existe.
 - Diviner sigue siendo el cuello de botella frío (33-134 s según carga
   del servidor): no hay alternativa medida, es temperatura REAL.
+
+---
+
+# TERCERA SESIÓN (16 nov, rama `dtm-rasterio`): SOPORTE DE MARTE
+
+**Pregunta que abrió la sesión:** "¿las fuentes abarcan también Marte? ¿por
+qué `obtener_datos_sitio(cuerpo='marte', ...)` no trae datos?" Respuesta
+corta: las fuentes SÍ (STAC de USGS tiene DTMs de CTX/HiRISE, Mars Trek
+tiene capas), pero el colector solo traía CATÁLOGOS para Marte, no datos
+puntuales, porque LOLA y Diviner son instrumentos lunares. Sesión: portar
+la receta DTM a Marte con el MISMO formato de diccionario.
+
+## 13. Sondas a las fuentes marcianas (lo medido contra lo real)
+
+### 13.1 El GDS de PDS NO tiene Marte (sonda descartada)
+
+- Presets probados con `gds_query`: `mola_rdr`, `molardr`, `mola`,
+  `themisrdr`, `mgs_tes` en la caja de Jezero (±0.05 y ±1°): TODOS
+  responden `error: 'Please include a query type'` (el GDS lunares no
+  reconoce presets marcianos; su User's Manual solo cubre LOLA/Diviner
+  y misiones lunares).
+- El ODE IIPT sí lista 597 combinaciones de productos marcianos (TGO ACS,
+  THEMIS, TES, CTX, HiRISE...), pero son descargas de productos crudos,
+  no un servicio de estadísticas puntuales.
+- **Veredicto: no hay 'GDS marciano'.** La vía puntual es el DTM del STAC.
+
+### 13.2 El STAC de USGS SÍ tiene DTMs de Marte en Jezero ✅
+
+- `usgs_stac.search(['mro_ctx_controlled_usgs_dtms', ...])` en Jezero:
+  10+ items con bbox, asset en S3 estático:
+  `.../P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W_dtm.tif`.
+- **Diferencia con la Luna:** el asset de Kaguya termina en `-dem.tif` y
+  el de CTX en `_dtm.tif` → el filtro de `topografia_dtm._tile_dem_para`
+  ahora acepta ambos sufijos (`SUFIJOS_DEM_TIF`).
+- Tamaño del tile CTX: descarga 4.2 s (sonda), lectura window-read igual.
+
+### 13.3 La CRS marciana (el hallazgo técnico de la sesión)
+
+- El tile CTX de Jezero usa **IAU_2015:49910**: 'Mars (2015) Sphere /
+  Ocentric / Equirectangular' PROYECTADA en METROS (bounds ~4.6M,
+  ~1.1M), a diferencia de los tiles Kaguya (geográficos, IAU_2015:30100,
+  grados).
+- PROJ de esta instalación NO puede transformar hacia/desde CRS de otros
+  cuerpos: `IAU_2015:30000` no parsea ('The WKT could not be parsed') y
+  hacia EPSG:4326 rechaza por mezclar Tierra↔Marte.
+- Solución: **fórmula manual de la equirectangular** x = R·(λ-λ0)·cos(φ1),
+  y = R·φ con R = 3.396.190 m (constantes.RADIO_DATUM_MARTE_M), leída de
+  `src.crs.to_dict()` (proj='eqc', lat_ts=0, lon_0=0, R=3396190).
+  VERIFICADA: bbox→metros exacto (window 882×882 px) e INVERSA exacta
+  (metros→(77.58, 18.38) sin error). El inverso alimenta la lat/lon de
+  los candidatos a cráter.
+- Limite: tiles marcianos POLARES usan proyección estereográfica ('stere')
+  → con esta instalación de PROJ no se pueden leer de forma segura; el
+  código devuelve error claro + fallback honesto (sin dato puntual).
+
+### 13.4 Gale no tiene DTM controlado (sonda)
+
+- Buscada la caja de Gale (±0.15, ±0.5 y ±1.5°) en CTX/HiRISE DTMs:
+  50 items, **0 tifs**. Los DTMs controlados solo existen en zonas
+  mapeadas por USGS (Jezero sí, Gale no).
+- Comportamiento del colector: sección topográfica en catálogos +
+  `nota_elevacion` honesta + `dtm_descargables` (10 tiles de imagen/THEMIS
+  listados). NUNCA se inventan números.
+
+## 14. Integración de Marte en `api.py` (mismo formato, políticas propias)
+
+- `topografia_dtm.analizar_sitio(..., cuerpo='moon'|'mars')`: radios de
+  datum por cuerpo (RADIOS_DE_DATUM), filtro de sufijos DEM, transformación
+  de caja PROJ-primeiro/manual-fallback, y conversión de cráteres a
+  lon/lat con el inverso eqc.
+- `_dtm_encadenado(cuerpo, ...)`: patrón idéntico al lunar (DTM encadenado
+  al futuro del STAC, reutiliza items).
+- Rama MARTE en `obtener_datos_sitio()`: pool de 3 hilos (Treks + STAC +
+  DTM), sección topográfica con las MISMAS claves que la Luna
+  (elevacion_m/pendiente/rugosidad/crateres_formaciones/dtm_detalle/
+  dtm_descargables/capas_trek + `via='dtm_mro'`).
+- **Política de cobertura RELAJADA para Marte: ≥50 %** (en la Luna ≥90 %):
+  sin fallback GDS, un tile que cubra la mitad de la caja sigue siendo la
+  única elevación puntual disponible. Cuando la cobertura es <90 % se
+  añade `nota_cobertura` al dict (medido: Jezero ±0.5° → 68 %).
+- Bug destapado y corregido: la ruta en serie `elif cuerpo != 'earth'`
+  también ejecutaba para Marte → 'Treks' aparecía 2 veces en `fuentes`.
+- Resumen del registro: mismas claves; con Marte `n_puntos_lola` cuenta
+  PÍXELES del DTM (4.262.513 en Jezero ±0.5°) y `via_topografia='dtm_mro'`.
+- Mapa geológico marciano añadido a constantes
+  (URL_MAPA_GEOLOGICO_MARTE, Global Geologic Map of Mars 1:20M) para las
+  referencias de `crateres_formaciones`.
+
+## 15. Benchmark y calidad de Marte (medidos)
+
+| Corrida (Jezero 18.38, 77.58) | Tiempo | Vía | Notas |
+|---|---|---|---|
+| Sonda tile frío (±0.15, tile nuevo) | ~6 s | DTM | descarga 4.2 s + STAC 2 s |
+| Completa frío catálogos (±0.5, tile ya en disco) | **2.8 s** | dtm_mro | Treks mars + STAC a la red; el resto de disco |
+| Completa tibia (±0.5, todo en caché) | **1.1 s** | dtm_mro | | 
+
+| Métrica | Jezero ±0.15 | Jezero ±0.5 (cobertura 68 %) |
+|---|---|---|
+| Píxeles del DTM | 777.763 | 4.262.513 |
+| Resolución | 20.2 m/px | 20.2 m/px |
+| Elevación media | **-2607.3 m** | -2377.9 m |
+| Rango elevación | -2699.9 … -2423.1 | -2699.9 … -1356.1 (borde del cráter) |
+| Pendiente media | 2.27° | 4.74° |
+| Rugosidad media (celdas ~100 m) | 1.11 m | 2.40 m |
+| Píxeles válidos | 99.98 % | 72 % |
+
+- La elevación media de ±0.15 (-2607 m) describe el PISO de Jezero
+  (consistente con la literatura: el fondo del cráter ronda -2.6 km); la
+  de ±0.5 (-2378 m) sube porque la caja pisa la ladera/borde oriental
+  (max -1356 m). Ambas plausibles: la diferencia es GEOMETRÍA de la caja,
+  no error.
+- Pendiente media 2.3-4.7°: coherente con un terreno de cráter + deltas
+  excavados. Rugosidad ~1-2 m moderada.
+- Sin datos reales de 'verdad terreno' para comparar (no hay LOLA
+  marciano): la verificación fue contra la CRS (inversa exacta) y la
+  plausibilidad geológica. Un contraste futuro: muestrear la capa DEM de
+  Mars Trek en la misma caja.
+- Regresión lunar verificada tras los cambios: Smythii tibio 4.2 s,
+  mismos números (-2325.34 / 3.731 / 1.932), vía dtm_kaguya intacta.
+
+## 16. Estado del soporte por cuerpo (resumen de las 3 sesiones)
+
+| Cuerpo | Topografía | Térmico | Superficie/Iluminación | Fallback |
+|---|---|---|---|---|
+| Luna | DTM Kaguya (malla 19-30 m) o LOLA GDS | Diviner GDS (real, 9 canales) | Treks + Clementine | DTM→LOLA (política ≥50 % px, ≥90 % cobertura) |
+| Marte | DTM CTX/HiRISE (malla ~20 m) o catálogos | THEMIS/TES (capas; sin puntual) | Treks (CRISM/Ω) | sin DTM→nota honesta |
+| Tierra | análogos_tierra (CMR/GIBS) | GIBS | Copernicus | — |

@@ -137,6 +137,13 @@ URL_MAPA_GEOLOGICO_LUNA = (
     "Moon/Geology/Unified_Geologic_Map_of_the_Moon_7_5M_v2"
 )
 
+# Mapa geológico global de Marte (USGS, 1:20M, revisión 2023): el equivalente
+# marciano para confirmar las formaciones/cráteres que sugiere el DTM.
+URL_MAPA_GEOLOGICO_MARTE = (
+    "https://astrogeology.usgs.gov/search/map/"
+    "Mars/Geology/Global_Geologic_Map_of_Mars_20M_v2"
+)
+
 # Variables terrestres que se piden a CMR cuando se incluye un análogo.
 # Cada tupla es (nombre del parámetro, palabra clave para search_collections).
 VARIABLES_CMR = [
