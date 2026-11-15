@@ -1,0 +1,18 @@
+# Datos descargados (GeoTIFF, CSV del GDS, teselas...)
+data/
+
+# Credenciales
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Artefactos de exploración
+*.html
+*.tmp
