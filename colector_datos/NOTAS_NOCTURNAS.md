@@ -240,3 +240,167 @@ Lectura honesta:
 4. La variación frío (95 s hoy vs 40-77 s en pruebas previas) es carga
    del servidor del GDS, no regresión nuestra; el paralelismo garantiza
    que NUNCA se suma Diviner+LOLA, solo se espera el peor.
+
+---
+
+# SEGUNDA NOCHE (15 → 16 nov, rama `dtm-rasterio`)
+
+**Estado:** integración del experimento A completada + caché de catálogos
+(recomendación #4 de la primera noche) + las 2 pruebas DTM pendientes
+(§3.3) ejecutadas. Todo medido contra las fuentes reales.
+
+---
+
+## 5. Regresión encontrada al arrancar
+
+- `prueba_funcion.py` volvía a estar ROTO (f-strings partidos en las líneas
+  del "veredicto"): el fix de la primera noche se hizo en disco pero no se
+  comiteó, y al sincronizar ramas se perdió. Corregido y esta vez
+  COMITEADO (`dbfdb66`). Lección: ningún fix queda hecho hasta que está en
+  un commit.
+- En ESTE dispositivo no había `rasterio` ni la carpeta `data/` (registro y
+  caché viven fuera del repo). Instalado `rasterio` 1.4.4 (pip, Python 3.11).
+  La caché/registro se reconstruyeron solos al correr.
+
+## 6. Las 2 pruebas DTM pendientes (§3.3 de la primera noche)
+
+### 6.1 Sitio de latitud media — luna 41.2, -23.7, ±0.05° ✅ PERFECTO
+
+- STAC 1.5 s + descarga 3.3 s (tile ~7 MB) + cómputo 0.1 s = **4.9 s frío**.
+- Cobertura del tile: **100 %** · píxeles válidos: **100 %** · 24.336 px
+  (vs ~790 puntos LOLA: 30× más muestras) · resolución **19.4 m/px**.
+- Elevación: media -2491.47 · mediana -2493.21 · std 6.24 m.
+- Pendiente: media 1.12° · máx 6.73°. Rugosidad: media 0.53 m (celdas 97 m).
+- Tibio (2ª corrida): **0.3 s TOTAL** (STAC de caché + tile en disco).
+
+### 6.2 Sitio polar — Malapert (luna -85.9, 0.7, ±0.2°) ⚠️ CONFIRMA EL MATIZ
+
+- STAC 2.2 s + descarga 2.1 s + cómputo 0.1 s = 4.4 s.
+- El tile EXISTE y cubre el **89 %** de la caja en proyección, pero solo el
+  **2 % de los píxeles son válidos** (243 px): los tiles polares de Kaguya
+  tienen huecos enormes en zonas de sombra sin imagen TC.
+- Números del trozo legible: elev ~+4194 m (macizo), pendiente media
+  20.2°, rugosidad 7.4 m — plausibles pero describen un 2 % de la caja.
+- **Veredicto: en polos el DTM NO es fuente primaria.** La política de
+  fallback (`confiable=False` → vía GDS LOLA) queda justificada con datos,
+  no por prudencia.
+
+### 6.3 Tabla resumen de cobertura
+
+| Sitio | lat | Cobertura tile | Píxeles válidos | ¿DTM utilizable? |
+|---|---|---|---|---|
+| Mare Smythii | -23.4 | 100 % | 100 % | SÍ |
+| Sitio medio | 41.2 | 100 % | 100 % | SÍ |
+| Malapert | -85.9 | 89 % | **2 %** | NO → fallback LOLA |
+
+## 7. Integración del experimento A en `api.py` (lo que faltaba)
+
+- Parámetro nuevo `usar_dtm=True` en `obtener_datos_sitio()`. Con él:
+  1. El pool lanza: catálogo Treks + GDS Diviner + búsqueda STAC +
+     **análisis DTM encadenado** al futuro del STAC (reutiliza sus items,
+     no repite la llamada).
+  2. **El GDS LOLA NO se lanza de entrada**: solo se consulta como
+     fallback SI el DTM no sirve (sin tile, <50 % de píxeles válidos o
+     <90 % de cobertura). Cuando el DTM cubre, el servidor frágil de PDS
+     recibe UNA consulta GDS menos por sitio.
+  3. Política de aceptación del DTM: `confiable` (≥50 % píxeles válidos)
+     Y `cobertura ≥ 0.9`. Malapert la falla por los dos criterios.
+- `topografia_dtm.py` ampliado para la integración:
+  - Elige tile por **bbox** (contiene el centro → si no, máximo solape);
+    `dtm_disponibles` ahora devuelve el bbox de cada item.
+  - Métricas normalizadas al MISMO formato que `utilidades.estadisticas`
+    (n/min/max/media/mediana/desv_estandar): la vía DTM y la vía LOLA son
+    intercambiables para `api.py`, el informe y el registro.
+  - **Cráteres sobre la malla** (celdas de 200 m, depresiones >1.5σ vs
+    vecinas a <500 m): misma heurística que la versión LOLA pero sobre la
+    matriz; sale grátis del mismo raster, 0 llamadas extra.
+  - `ImportError` de rasterio tratado: mensaje claro + fallback a LOLA.
+- Registro: el resumen ahora lleva `via_topografia` ('dtm_kaguya' o
+  'lola_gds'). OJO: con vía DTM, `n_puntos_lola` cuenta PÍXELES de la
+  malla (nombre histórico que se mantuvo por comparabilidad).
+- `prueba_funcion.py` (el informe): bandera nueva `--sin_dtm` para correr
+  la comparación A/B de vías desde la línea de comandos.
+- `requirements.txt`: `rasterio` deja de ser opcional-comentado (es la
+  dependencia de la vía integrada; sin él, fallback automático a LOLA).
+
+## 8. Caché de catálogos (recomendación #4 de la primera noche)
+
+- `cache_catalogo.py` (nuevo): JSON en `data/cache/catalogos/` para el
+  catálogo Treks (por cuerpo+proyección) y la búsqueda STAC (por caja).
+  Sin caducidad (misma lógica que la caché GDS: blindaje de demo), con
+  soporte opcional de TTL y escritura atómica.
+- `api._capas_trek` y `topografia.dtm_disponibles` pasan por ella. Medido:
+  el STAC pasa de ~2-3 s a **0.0-0.2 s** tibio; el catálogo Treks (~8 s)
+  sale del disco en milisegundos.
+
+## 9. Benchmark de la integración (medido hoy, sitio Mare Smythii)
+
+Mismo sitio (luna -23.4, 157.8, ±0.05°), tres corridas reales:
+
+| Corrida | Config | Total | Topografía vía | Notas |
+|---|---|---|---|---|
+| A — frío clásico | `usar_dtm=False` | **41.3 s** | LOLA (GDS) | Diviner+LOLA fríos en paralelo; techo = la GDS más lenta |
+| B — tibio DTM | `usar_dtm=True` | **4.2 s** | **DTM Kaguya** | GDS de caché; DTM de disco; LOLA ni se consulta |
+| C — frío sitio NUEVO | `usar_dtm=True` (41.2,-23.7) | **33.0 s** | **DTM Kaguya** | Solo Diviner fue a la red; topografía en 0.1 s; 0 llamadas a LOLA |
+
+- La corrida C es EL RESULTADO DE LA NOCHE: sitio nunca visto, consulta
+  fría completa en 33 s donde antes el GDS LOLA añadía su propio tiempo de
+  cola; y el servidor de PDS recibió solo la consulta de Diviner.
+- El techo frío lo pone Diviner (irremplazable: temperatura MEDIDA). Con
+  el sitio ya visitado (B): 4.2 s, y con catálogos de caché el suelo está
+  en ~3-4 s (antes 11 s).
+
+### 9.1 Calidad DTM vs LOLA en el MISMO sitio (Smythii)
+
+| Métrica | DTM (26.7 m) | LOLA (GDS, corrida A) | Δabs | Δrel |
+|---|---|---|---|---|
+| Elevación media (m) | -2325.34 | -2336.78 | 11.4 | 0.5 % |
+| Pendiente media (°) | 3.731 | 2.246 | 1.49 | 66 % |
+| Rugosidad media (m) | 1.932 | 3.227 | 1.30 | 40 % |
+| Muestras | 12.978 px | 1.054 puntos | — | — |
+| Candidatos cráter | 0 | 1 | — | — |
+
+- Elevación: acuerdo excelente (0.5 %). Pendiente/rugosidad difieren POR
+  DISEÑO (mismas cifras que la primera noche: comparación reproducible
+  entre dispositivos). El DTM ve relieves cortos que la nube dispersa
+  suaviza; para "¿se puede aterrizar?" el DTM es más conservador y
+  representativo (muestreo uniforme).
+- Cráteres: la heurística en malla (200 m) y la de nube (celdas 100 m con
+  puntos dispersos) no son 1:1. Smythii es una mare llana: 0 vs 1 es el
+  ruido del umbral. Ver §9.2 para el caso que sí muerde.
+
+### 9.2 DTM vs LOLA en el sitio medio (41.2, -23.7): OJO, Δ elevación 102 m
+
+| Métrica | DTM (19.4 m) | LOLA (primera noche) | Δabs | Δrel |
+|---|---|---|---|---|
+| Elevación media (m) | -2491.47 | -2389.3 | 102.2 | 4.3 % |
+| Pendiente media (°) | 1.12 | 0.442 | 0.68 | — |
+| Rugosidad media (m) | 0.53 | 0.905 | 0.38 | — |
+| Muestras | 24.336 px | 790 puntos | — | — |
+
+- En Smythii ambas fuentes coincidían al 0.5 %; aquí difieren un 4.3 %.
+  Hipótesis más plausible: los 790 puntos LOLA están agrupados en las
+  huellas de las órbitas y pueden quedar sesgados hacia una ladera si la
+  caja pisa un gradiente; el DTM muestrea TODO el terreno uniformemente.
+- Lectura operativa idéntica en ambas fuentes (mare llano, pendiente
+  mínima). Decisión propuesta para mañana: en el informe, la vía DTM es
+  la fuente de elevación/pendiente/rugosidad cuando cubre, y la vía LOLA
+  queda como verificación independiente (o como fuente única si se
+  prefiere conservadorismo histórico). NO mezclar cifras de ambas vías en
+  un mismo número.
+
+## 10. Pendiente para mañana (decisión de Axel)
+
+1. Corrida D (fallback polar real vía `obtener_datos_sitio`): en vuelo al
+   momento de escribir esto; resultado en §9.3.
+2. Línea base LOLA del sitio medio (41.2,-23.7) EN ESTE dispositivo, para
+   completar la tabla §9.2 con una medición propia (la de arriba usa la
+   cifra de la primera noche).
+3. Merge a `master`: la rama `dtm-rasterio` ahora contiene D+E+cache de
+   catálogos+integración A con fallback verificado. Todo aditivo y
+   reversible (usar_dtm=False restaura el comportamiento de antes).
+4. Ideas NO implementadas (por alcance, documentadas para no perderlas):
+   mosaico multi-tile para cajas grandes (hoy 1 tile + política de
+   cobertura), cráteres por segmentación del DTM (la heurística actual es
+   de cribado), TTL en catálogos, elevación marciana vía rasterio (los
+   DTMs de HiRISE/CTX del STAC usan la misma receta).

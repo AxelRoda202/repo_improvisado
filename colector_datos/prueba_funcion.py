@@ -323,6 +323,9 @@ def main() -> None:
                         help="longitud propia (junto a --lat)")
     parser.add_argument("--radio", type=float, default=None,
                         help="semiancho de la caja en grados (por defecto el del sitio, o 0.05)")
+    parser.add_argument("--sin_dtm", action="store_true",
+                        help="fuerza la topografía por GDS LOLA aunque el DTM "
+                             "de Kaguya cubra la caja (comparación A/B de vías)")
     args = parser.parse_args()
 
     # Se decide el sitio: coordenadas propias si el usuario las dio,
@@ -362,8 +365,9 @@ def main() -> None:
         lat=lat,
         lon=lon,
         radio=radio,
-        usar_gds=True,   # siempre completo: los GDS traen los datos crudos
-        aviso=print,     # informa cada etapa (las GDS tardan varios minutos)
+        usar_gds=True,       # siempre completo: los GDS traen los datos crudos
+        usar_dtm=not args.sin_dtm,  # --sin_dtm = topografía por GDS LOLA
+        aviso=print,         # informa cada etapa (las GDS tardan varios minutos)
     )
 
     print(f"Listo en {round(time.time() - t0)} s.\n")

@@ -140,9 +140,16 @@ def dtm_disponibles(cuerpo: str, bbox_stac: tuple[float, float, float, float],
     Una única llamada POST /search con TODAS las colecciones interesantes a
     la vez (polares o globales según la latitud del sitio). Devuelve, por
     cada producto, la URL del mejor raster (`best_asset`), lista para
-    descargar o para abrir con rasterio/GDAL.
+    descargar o para abrir con rasterio/GDAL, MÁS el bbox del item: con él
+    se puede elegir el tile que de verdad cubre la caja (los tiles Kaguya
+    son franjas/cuadrantes y en una caja pueden solaparse varios).
+
+    La búsqueda pasa por la caché de catálogos (cache_catalogo): el mismo
+    sitio no necesita re-consultar el STAC en cada corrida (ahorra ~2-3 s
+    por consulta y una llamada al servidor).
     """
     from nsac.sources import usgs_stac
+    from . import cache_catalogo
 
     if cuerpo == "mars":
         colecciones = constantes.COLECCIONES_STAC["marte"]
@@ -152,15 +159,28 @@ def dtm_disponibles(cuerpo: str, bbox_stac: tuple[float, float, float, float],
     else:
         colecciones = constantes.COLECCIONES_STAC["luna_global"]
 
-    items = usgs_stac.search(colecciones, bbox=bbox_stac, limit=10)
-    return [
-        {
-            "id": it.get("id"),
-            "fecha": it.get("datetime"),
-            "url_mejor_asset": usgs_stac.best_asset(it),
-        }
-        for it in items
-    ]
+    # Clave de caché legible: cuerpo + banda de colecciones + caja redondeada.
+    # (El redondeo a 3 decimales evita duplicar entradas por ruido flotante;
+    #  0.001° ≈ 30 m: exactitud sobrada para elegir tiles de km.)
+    o, s, e, n = (round(v, 3) for v in bbox_stac)
+    limpio = lambda v: f"{v:.3f}".replace("-", "m").replace(".", "p")
+    nombre_cache = (f"stac_dtm_{cuerpo}_{'sur' if lat < 0 else 'norte' if abs(lat) >= 80 else 'global'}"
+                    f"_{limpio(o)}_{limpio(s)}_{limpio(e)}_{limpio(n)}")
+
+    def _buscar() -> list[dict[str, Any]]:
+        items = usgs_stac.search(colecciones, bbox=(o, s, e, n), limit=10)
+        return [
+            {
+                "id": it.get("id"),
+                "bbox": it.get("bbox"),
+                "fecha": it.get("datetime"),
+                "url_mejor_asset": usgs_stac.best_asset(it),
+            }
+            for it in items
+        ]
+
+    items, _de_cache = cache_catalogo.json_o_red(nombre_cache, _buscar)
+    return items
 
 
 # ---------------------------------------------------------------------------

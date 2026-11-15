@@ -4,23 +4,31 @@ el DTM de Kaguya (GeoTIFF) en vez de la nube de puntos de LOLA (GDS).
 POR QUÉ: el GDS tarda minutos porque el servidor fabrica el CSV a mano alzada
 punto por punto. Los DTMs de Kaguya Terrain Camera (USGS Astrogeology) son
 GeoTIFFs de ~7 MB en un S3 estático: se descargan en segundos y la lectura es
-un trozo de matriz (window read), no una consulta pesada. Resolución ~10 m/px,
-muy superior a la separación típica de los puntos LOLA crudos.
+un trozo de matriz (window read), no una consulta pesada. Resolución real
+19-30 m/px (según el tile), muy superior a la separación típica de los puntos
+LOLA crudos.
 
-QUÉ CALCULA (misma familia de métricas que la vía GDS, para poder comparar):
-  - elevación: mín/media/mediana/máx/desv. típica
-  - pendiente: gradiente local en grados (con distancia real en metros,
-    corregida por la latitud si el raster es geográfico)
-  - rugosidad: desv. típica dentro de celdas de ~100 m (misma definición que
-    `utilidades.pendiente_y_rugosidad` usa sobre la nube de puntos)
-  - cobertura: cuánto de la caja pedida queda dentro del tile (los tiles de
-    Kaguya son cuadrantes; una caja grande puede necesitar más de uno)
+QUÉ CALCULA (mismas métricas que la vía GDS, en el MISMO formato, para poder
+comparar y para que `api.py` las enchufe sin adaptación):
+  - elevación: {n, min, media, mediana, max, desv_estandar} (m sobre datum)
+  - pendiente: idem, por gradiente local con distancia real en metros
+  - rugosidad: idem, desv. típica dentro de celdas de ~100 m (misma
+    definición que `utilidades.pendiente_y_rugosidad` usa sobre la nube)
+  - cráteres: depresiones de >sigma·σ respecto a sus vecinas sobre celdas
+    de ~200 m (misma heurística que `utilidades.detectar_crateres` pero
+    sobre la malla regular del DTM, sin nube de puntos)
+  - cobertura: fracción de la caja dentro del tile y fracción de píxeles
+    válidos (los tiles POLARES tienen huecos enormes por sombra: medido en
+    Malapert, solo 2 % de píxeles útiles → ahí NO hay que fiarse del DTM)
 
-FALLBACK: si no hay tile DEM (`.tif`) que cubra el sitio, se devuelve un dict
-con `fallback="lolardr"` y `api.py` (cuando esto se integre) usaría la vía
-GDS de siempre. Este módulo NO sustituye a `topografia.py`: es un piloto.
+FALLBACK: si no hay tile DEM que cubra la caja, si los píxeles válidos son
+menos de la mitad o si `rasterio` no está instalado, se devuelve un dict con
+`fallback="lolardr"` y `api.py` usa la vía GDS de siempre. Este módulo y
+`topografia.py` conviven: no se sustituye a LOLA a la fuerza, se elige por
+calidad de cobertura.
 
-Solo se toca la red 2 veces: 1 POST al STAC (metadatos) + 1 GET del TIFF.
+Solo se toca la red 2 veces: 1 POST al STAC (metadatos, cacheado) + 1 GET
+del TIFF (guardado en data/cache/dtm/, datos históricos como la caché GDS).
 """
 
 from __future__ import annotations
@@ -39,22 +47,63 @@ RADIO_LUNA_M = 1_737_400.0
 CARPETA_TILES = Path(constantes.RUTA_REGISTRO).parent / "cache" / "dtm"
 
 
-def _tile_dem_para(bbox_stac: tuple, lat: float) -> dict[str, Any] | None:
-    """Del catálogo STAC, elige el tile DEM (GeoTIFF) que cubra el CENTRO.
+def _a_estadisticas(n: int, vmin: float, media: float, mediana: float,
+                    vmax: float, desv: float) -> dict[str, Any]:
+    """Mismo formato que `utilidades.estadisticas`, a partir de numpy.
 
-    `dtm_disponibles` ya habla con el STAC y trae `url_mejor_asset` por item;
-    aquí solo filtramos los que son TIFF de elevación (los items de LOLA
-    apuntan a nubes de puntos `.copc.laz`, que pesan 100+ MB: descartados).
-    Si hay varios, gana el que contenga el centro de la caja.
+    `api.py` y el informe (`prueba_funcion.py`) consumen esta forma de dict
+    para elevación/pendiente/rugosidad; con esto la vía DTM y la vía LOLA
+    son intercambiables para todos los consumidores.
     """
-    from nsac.sources import usgs_stac  # solo para reusar la sesión HTTP
+    r = lambda v: round(float(v), 3)
+    return {
+        "n": int(n),
+        "min": r(vmin),
+        "max": r(vmax),
+        "media": r(media),
+        "mediana": r(mediana),
+        "desv_estandar": r(desv),
+    }
 
-    items = topografia.dtm_disponibles("moon", bbox_stac, lat)
+
+def _tile_dem_para(bbox_stac: tuple, lat: float, lon: float,
+                   items: list[dict] | None = None) -> dict[str, Any] | None:
+    """Del catálogo STAC, elige el tile DEM (GeoTIFF) que cubra la caja.
+
+    `dtm_disponibles` ya habla con el STAC (y ahora lo cachea); si el
+    llamador trae esos items (`items`), se reutilizan y no se repite la
+    llamada. Filtramos los que son TIFF de elevación (los items de LOLA
+    apuntan a nubes `.copc.laz` de 100+ MB: descartados).
+
+    Con bbox en los items, gana el tile que CONTIENE el centro de la caja;
+    si ninguno lo contiene, el de mayor solape con la caja. Sin bbox
+    (formato antiguo), cae al primer tif como antes.
+    """
+    if items is None:
+        items = topografia.dtm_disponibles("moon", bbox_stac, lat)
+
     tifs = [it for it in items
             if str(it.get("url_mejor_asset", "")).lower().endswith("-dem.tif")]
     if not tifs:
         return None
-    return tifs[0]  # por ahora: 1 tile (ver 'cobertura' en el informe)
+
+    con_bbox = [it for it in tifs
+                if isinstance(it.get("bbox"), (list, tuple)) and len(it["bbox"]) >= 4]
+    if not con_bbox:
+        return tifs[0]  # sin bbox: no hay nada mejor que elegir
+
+    def _solape(it) -> float:
+        w, s, e, n = it["bbox"][:4]
+        ix = max(0.0, min(e, bbox_stac[2]) - max(w, bbox_stac[0]))
+        iy = max(0.0, min(n, bbox_stac[3]) - max(s, bbox_stac[1]))
+        return ix * iy
+
+    # 1º: tile que contenga el centro; 2º: el de mayor solape con la caja.
+    for it in con_bbox:
+        w, s, e, n = it["bbox"][:4]
+        if w <= lon <= e and s <= lat <= n:
+            return it
+    return max(con_bbox, key=_solape)
 
 
 def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
@@ -63,11 +112,8 @@ def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
     Si el CRS es proyectado (p.ej. estereográfico polar), el transform ya va
     en metros. Si es geográfico (grados), hay que multiplicar por el radio
     lunar y el coseno de la latitud (los meridianos se juntan hacia el polo).
-    Se calcula con la propia librería: transformamos 2 puntos vecinos a
-    lon/lat y medimos el arco con la fórmula del haversine.
     """
     import numpy as np
-    import rasterio.warp
 
     if crs is not None and not crs.is_geographic:
         return abs(transform.a), abs(transform.e)
@@ -76,8 +122,6 @@ def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
     # - vertical: arco por grado * grados de píxel (no depende de la latitud)
     # - horizontal: lo mismo multiplicado por cos(lat) (los meridianos se
     #   van juntando hacia el polo)
-    import numpy as np
-
     dx_grados = abs(transform.a)
     dy_grados = abs(transform.e)
     arc_por_grado = 3.141592653589793 * RADIO_LUNA_M / 180.0
@@ -86,19 +130,155 @@ def _metros_por_pixel(transform, crs, lat_centro: float) -> tuple[float, float]:
     return float(dx_m), float(dy_m)
 
 
+def _crateres_de_malla(z, z_transform, fila0: int, col0: int, crs,
+                       dx_m: float, sigma: float = 1.5,
+                       celda_m: float = 200.0,
+                       radio_busqueda_m: float = 500.0) -> dict[str, Any]:
+    """Detección APROXIMADA de cráteres sobre la malla regular del DTM.
+
+    Misma heurística que `utilidades.detectar_crateres` pero sin nube de
+    puntos: el DTM da una MALLA, así que el "nivel medio del terreno" se
+    calcula con celdas de `celda_m` metros (media de píxeles) y un cráter
+    es una celda hundida >sigma·σ respecto a la media de sus vecinas a
+    menos de `radio_busqueda_m`.
+
+    La profundidad está en la MISMA escala que la versión LOLA, así que los
+    candidatos de ambas vías son comparables.
+
+    `fila0`/`col0` son los índices ABSOLUTOS del raster donde empieza la
+    ventana `z` (win.row_off / win.col_off): hacen falta para convertir
+    índices de la matriz a coordenadas geográficas.
+    """
+    import numpy as np
+    import warnings
+
+    paso = max(1, int(round(celda_m / max(dx_m, 1e-6))))
+    h = (z.shape[0] // paso) * paso
+    w = (z.shape[1] // paso) * paso
+    if h < paso or w < paso:
+        return {"nota": "caja más pequeña que una celda de 200 m",
+                "candidatos": []}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Media de altura por celda: la matriz se recorta a múltiplos del
+        # paso y se reordena en bloques paso×paso.
+        bloques = z[:h, :w].reshape(h // paso, paso, w // paso, paso)
+        media_celdas = np.nanmean(bloques, axis=(1, 3))
+        # Celdas sin datos suficientes (sombras) quedan como NaN.
+        n_validos = np.isfinite(bloques).sum(axis=(1, 3))
+        media_celdas[n_validos < max(1, (paso * paso) // 2)] = np.nan
+
+    M = media_celdas
+    validos = np.isfinite(M)
+    if validos.sum() < 9:
+        return {"nota": "demasiadas celdas sin datos (sombras) para detectar",
+                "candidatos": []}
+
+    global_desv = float(np.nanstd(M))
+    if global_desv <= 0:
+        return {"metodo": "terreno uniforme (σ=0)", "candidatos": []}
+
+    # Media de las vecinas a menos de radio_busqueda_m: acumulamos la suma
+    # y el número de vecinos desplazando la matriz en todos los (dr, dc)
+    # del cuadrado ±k. Con celdas de 200 m, k=2 cubre ±400 m ≈ los 500 m
+    # pedidos, y son solo (2k+1)²-1 = 24 desplazamientos.
+    k = max(1, int(round(radio_busqueda_m / (paso * dx_m))))
+    suma = np.zeros_like(M)
+    cuenta = np.zeros_like(M)
+    filas_n, cols_n = M.shape
+    for dr in range(-k, k + 1):
+        for dc in range(-k, k + 1):
+            if dr == 0 and dc == 0:
+                continue
+            # destino[i, j] acumula M[i+dr, j+dc]. Solo valen las celdas
+            # donde ambos índices quedan dentro de la matriz.
+            f_ori = slice(max(0, -dr), filas_n - max(0, dr))
+            c_ori = slice(max(0, -dc), cols_n - max(0, dc))
+            f_dst = slice(max(0, dr), filas_n - max(0, -dr))
+            c_dst = slice(max(0, dc), cols_n - max(0, -dc))
+            pedazo = M[f_ori, c_ori]
+            suma[f_dst, c_dst] += np.nan_to_num(pedazo, nan=0.0)
+            cuenta[f_dst, c_dst] += np.isfinite(pedazo)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        media_vecinos = np.where(cuenta > 0, suma / np.maximum(cuenta, 1),
+                                 np.nan)
+        hundimiento = media_vecinos - M
+        # 'hundimiento > 0' = la celda está DEBAJO de sus vecinas (cráter).
+        mask = (validos & (cuenta >= 4)
+                & (hundimiento > sigma * global_desv))
+
+    filas, columnas = np.where(mask)
+    metodo = (f"depresiones de >{sigma}σ en celdas de {celda_m:.0f} m "
+              f"vs vecinas a menos de {radio_busqueda_m:.0f} m "
+              "(malla regular del DTM)")
+    if filas.size == 0:
+        return {"metodo": metodo, "n_candidatos": 0, "candidatos": []}
+
+    # Orden por profundidad y nos quedamos con los 10 mayores.
+    profundidades = hundimiento[filas, columnas]
+    orden = np.argsort(profundidades)[::-1][:10]
+
+    # Celdas -> coordenadas: los índices de `filas/columnas` son LOCALES a
+    # la ventana leída; rasterio necesita filas ABSOLUTAS del raster.
+    import rasterio.transform
+    xs, ys = rasterio.transform.xy(
+        z_transform,
+        (filas + fila0).tolist(), (columnas + col0).tolist(),
+        offset="center")
+
+    # (x, y) están en la CRS del tile. Geográfica = (lon, lat) directamente;
+    # proyectada (polos) = transformamos a la geográfica LUNAR IAU_2015:30100.
+    xs_a = np.atleast_1d(np.asarray(xs, dtype="float64"))
+    ys_a = np.atleast_1d(np.asarray(ys, dtype="float64"))
+    if crs is not None and crs.is_geographic:
+        lons, lats = xs_a, ys_a
+    else:
+        try:
+            import rasterio.warp
+            lons_w, lats_w = rasterio.warp.transform(
+                crs, "IAU_2015:30100", xs_a.tolist(), ys_a.tolist())
+            lons = np.atleast_1d(np.asarray(lons_w, dtype="float64"))
+            lats = np.atleast_1d(np.asarray(lats_w, dtype="float64"))
+        except Exception:
+            lons = np.full(xs_a.shape, np.nan)  # sin CRS lunar: sin lat/lon
+            lats = np.full(xs_a.shape, np.nan)
+
+    candidatos = []
+    for i in orden:
+        lon_c = ((float(lons[i]) + 180.0) % 360.0) - 180.0
+        candidatos.append({
+            "lat": round(float(lats[i]), 5),
+            "lon": round(lon_c, 5),
+            "profundidad_est_m": round(float(profundidades[i]), 1),
+        })
+    return {
+        "metodo": metodo,
+        "n_candidatos": int(filas.size),
+        "candidatos": candidatos,
+    }
+
+
 def analizar_sitio(lat: float, lon: float, radio: float,
+                   items_stac: list[dict] | None = None,
                    aviso=None) -> dict[str, Any]:
     """Piloto completo del experimento A para UN sitio lunar.
 
     Pasos (cronometrados por separado):
-      1. STAC: buscar el tile Kaguya TC DEM que cubre la caja.
+      1. STAC: elegir el tile Kaguya TC DEM que cubre la caja (items
+         precargados si el llamador ya hizo la búsqueda; si no, la hace).
       2. Descarga: bajar el GeoTIFF (~7 MB) a data/cache/dtm/ (si ya estaba,
          se salta la red).
-      3. Cómputo: window read del trozo que interesa + pendiente + rugosidad.
+      3. Cómputo: window read del trozo que interesa + pendiente + rugosidad
+         + candidatos a cráter.
 
-    Devuelve un dict con métricas + metadatos + tiempos + cobertura. NUNCA
-    lanza: ante cualquier fallo devuelve {'error': ..., 'fallback': 'lolardr'}
-    para que la integración futura sepa que debe usar la vía GDS.
+    Devuelve un dict con métricas EN EL MISMO FORMATO que la vía GDS
+    ('elevacion'/'pendiente'/'rugosidad' con claves n/min/max/media/...) +
+    metadatos + tiempos + cobertura. NUNCA lanza: ante cualquier fallo
+    devuelve {'error': ..., 'fallback': 'lolardr'} para que `api.py` sepa
+    que debe usar la vía GDS.
     """
     import numpy as np
 
@@ -115,9 +295,9 @@ def analizar_sitio(lat: float, lon: float, radio: float,
         norte = min(90.0, lat + radio)
         bbox_stac = (oeste, sur, este, norte)
 
-        # --- 1) STAC -------------------------------------------------------
+        # --- 1) STAC (reutiliza items si el llamador ya los trajo) ---------
         t0 = time.perf_counter()
-        tile = _tile_dem_para(bbox_stac, lat)
+        tile = _tile_dem_para(bbox_stac, lat, lon, items_stac)
         out["stac_s"] = round(time.perf_counter() - t0, 1)
         if tile is None:
             out["error"] = "sin tile Kaguya DEM (tif) que cubra la caja"
@@ -195,10 +375,10 @@ def analizar_sitio(lat: float, lon: float, radio: float,
             win = from_bounds(max(izquierda, b.left), max(abajo, b.bottom),
                               min(derecha, b.right), min(arriba, b.top),
                               transform=src.transform)
+            fila0, col0 = int(win.row_off), int(win.col_off)
             z = src.read(1, window=win).astype("float64")
             z_transform = src.transform  # ojo: es la del raster entero
             crs = src.crs
-            res_px = (src.res[0], src.res[1])
             nodata = src.nodata
 
         # Nodata (Kaguya usa -32767 u otros centinelas): fuera. En los
@@ -218,41 +398,36 @@ def analizar_sitio(lat: float, lon: float, radio: float,
 
         # POLÍTICA DE FIABILIDAD: si menos de la mitad de la caja tiene
         # píxeles reales (típico en tiles polares, huecos por sombra),
-        # las métricas describen un trozo, no el sitio. `api.py`, al
-        # integrar esto, debería caer al fallback LOLA en ese caso.
+        # las métricas describen un trozo, no el sitio. `api.py` cae al
+        # fallback LOLA en ese caso (comprueba 'confiable').
         out["confiable"] = out["pixeles_validos_fraccion"] >= 0.5
 
         dx_m, dy_m = _metros_por_pixel(z_transform, crs, lat)
         out["resolucion_m"] = round((dx_m + dy_m) / 2.0, 1)
 
-        # Elevación (m sobre el radio de referencia lunar).
-        out["elevacion"] = {
-            "n_pixeles": validos,
-            "min": round(float(np.nanmin(z)), 3),
-            "media": round(float(np.nanmean(z)), 3),
-            "mediana": round(float(np.nanmedian(z)), 3),
-            "max": round(float(np.nanmax(z)), 3),
-            "std": round(float(np.nanstd(z)), 3),
-        }
+        # Elevación (m sobre el radio de referencia lunar), formato estándar.
+        out["elevacion"] = _a_estadisticas(
+            validos,
+            np.nanmin(z), np.nanmean(z), np.nanmedian(z),
+            np.nanmax(z), np.nanstd(z))
+        out["elevacion"]["n_pixeles"] = validos  # alias legible
 
         # Pendiente: gradiente por diferencia finita con distancia real.
         gy, gx = np.gradient(z, dy_m, dx_m)
         pend = np.degrees(np.arctan(np.hypot(gx, gy)))
         pend = pend[np.isfinite(pend) & np.isfinite(z)]
-        out["pendiente"] = {
-            "n_pixeles": int(pend.size),
-            "media": round(float(pend.mean()), 3),
-            "mediana": round(float(np.median(pend)), 3),
-            "max": round(float(pend.max()), 3),
-        }
+        out["pendiente"] = _a_estadisticas(
+            pend.size, pend.min(), pend.mean(), np.median(pend),
+            pend.max(), pend.std())
+        out["pendiente"]["n_pixeles"] = int(pend.size)
 
         # Rugosidad: std de la altura dentro de celdas de ~100 m (misma
         # definición que la vía GDS -> comparable directamente).
-        paso = max(1, int(round(100.0 / max(dx_m, 1e-6))))
-        h = (z.shape[0] // paso) * paso
-        w = (z.shape[1] // paso) * paso
-        if h >= paso and w >= paso:
-            bloques = z[:h, :w].reshape(h // paso, paso, w // paso, paso)
+        paso_r = max(1, int(round(100.0 / max(dx_m, 1e-6))))
+        h = (z.shape[0] // paso_r) * paso_r
+        w = (z.shape[1] // paso_r) * paso_r
+        if h >= paso_r and w >= paso_r:
+            bloques = z[:h, :w].reshape(h // paso_r, paso_r, w // paso_r, paso_r)
             # Un bloque entero en sombra (todo NaN) dispara un aviso de
             # numpy ('Degrees of freedom <= 0'): es esperable, se calla.
             import warnings
@@ -260,19 +435,30 @@ def analizar_sitio(lat: float, lon: float, radio: float,
                 warnings.simplefilter("ignore")
                 rug_celda = np.nanstd(bloques, axis=(1, 3))
             rug = rug_celda[np.isfinite(rug_celda)]
-            out["rugosidad"] = {
-                "n_celdas_100m": int(rug.size),
-                "media": round(float(rug.mean()), 3),
-                "mediana": round(float(np.median(rug)), 3),
-                "max": round(float(rug.max()), 3),
-                "tamano_celda_m": paso * dx_m,
-            }
+            if rug.size:
+                out["rugosidad"] = _a_estadisticas(
+                    rug.size, rug.min(), rug.mean(), np.median(rug),
+                    rug.max(), rug.std())
+                out["rugosidad"]["n_celdas_100m"] = int(rug.size)
+                out["rugosidad"]["tamano_celda_m"] = round(paso_r * dx_m, 1)
+            else:
+                out["rugosidad"] = {"nota": "sin celdas con datos suficientes"}
         else:
             out["rugosidad"] = {"nota": "caja más pequeña que una celda de 100 m"}
+
+        # Cráteres/formaciones: heurística sobre la malla del DTM (grátis,
+        # sin llamadas; los confirmados se verifican con el mapa geológico).
+        out["crateres"] = _crateres_de_malla(z, z_transform, fila0, col0,
+                                             crs, dx_m)
 
         out["computo_s"] = round(time.perf_counter() - t0, 1)
         out["total_s"] = round(
             out["stac_s"] + out["descarga_s"] + out["computo_s"], 1)
+    except ImportError as exc:
+        # rasterio/numpy no instalados: mensaje claro y fallback limpio.
+        out["error"] = (f"dependencia ausente ({exc}): instala rasterio o "
+                        "llama con usar_dtm=False")
+        out["fallback"] = "lolardr"
     except Exception as exc:
         out["error"] = str(exc)
         out["fallback"] = "lolardr"

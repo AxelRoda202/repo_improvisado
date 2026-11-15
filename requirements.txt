@@ -5,7 +5,7 @@ pandas>=2.0
 # Opcionales (descomenta lo que uses)
 # earthaccess>=0.13          # búsqueda + descarga autenticada de NASA Earthdata
 # pystac-client>=0.8         # cliente STAC genérico (USGS, Copernicus, EarthCODE)
-# rasterio>=1.3              # leer GeoTIFF / COG
+rasterio>=1.3               # leer GeoTIFF / COG — usa la topografía DTM de Kaguya (usar_dtm=True); sin él cae al GDS LOLA
 # rioxarray>=0.15            # recortes por bbox
 # matplotlib>=3.8            # gráficos
 # folium>=0.16               # mapas rápidos en HTML

@@ -15,14 +15,17 @@ temáticos y devuelve UN diccionario con TODOS los parámetros del reto:
       "teselas_para_mapa": {...opcional, URLs WMTS para Leaflet...}
     }
 
-Presupuesto de llamadas HTTP (Luna, caso normal):
-    1  catálogo Treks        (todas las capas de una vez)
-    2  GDS Diviner           (consulta + CSV: térmico + albedo en UNA ida)
-    2  GDS LOLA              (consulta + CSV: elevación/pendiente/rugosidad)
-    1  STAC USGS             (todos los DTM de golpe)
+Presupuesto de llamadas HTTP (Luna, caso normal, usar_dtm=True):
+    1  catálogo Treks        (todas las capas de una vez; cacheado)
+    1  STAC USGS             (tiles Kaguya; cacheado)
+    1  descarga tile DTM     (~7 MB, S3 estático; cacheado)  -> topografía
+    1  GDS Diviner           (consulta + CSV: térmico + albedo en UNA ida)
+    0  GDS LOLA              ¡ni se consulta si el DTM cubre la caja!
     1  PDS Search            (bundles Clementine para minerales)
     ------------------------
-    7 llamadas en total      (+2 por capa si con_teselas=True, +~6 con tierra)
+    5 llamadas en total      (+2 por capa si con_teselas=True, +~6 con tierra)
+    Con usar_dtm=False la topografía vuelve a la vía GDS LOLA clásica
+    (2 llamadas GDS LOLA) en paralelo con Diviner.
 
 En Marte no hay LOLA/Diviner (son instrumentos lunares): la topografía sale
 del STAC (DTM HiRISE/CTX) y el resto de capas del catálogo Mars Trek
@@ -41,6 +44,7 @@ from . import (
     superficie,
     termico,
     topografia,
+    topografia_dtm,
     utilidades,
 )
 
@@ -50,11 +54,16 @@ def _capas_trek(cuerpo: str, projtype: str) -> tuple[list, str]:
 
     Se usa tanto en la ruta paralela (dentro de un hilo) como en la serie,
     por eso vive en una función propia: nunca lanza, el error va en el texto.
+    El catálogo pasa por la caché de catálogos: tras la primera consulta del
+    día responde del disco en milisegundos (ver cache_catalogo.py).
     """
     from nsac.sources import trek
+    from . import cache_catalogo
 
     try:
-        capas = trek.layers(cuerpo, projtype=projtype)
+        capas, _de_cache = cache_catalogo.json_o_red(
+            f"treks_{cuerpo}_{projtype}",
+            lambda: trek.layers(cuerpo, projtype=projtype))
         return capas, f"Treks ({len(capas)} capas, proyección {projtype})"
     except Exception as exc:
         return [], f"Treks FALLÓ: {exc}"
@@ -66,6 +75,26 @@ def _dtm_de_stac(cuerpo: str, bbox_s: tuple, lat: float) -> tuple[Any, str]:
         return topografia.dtm_disponibles(cuerpo, bbox_s, lat), "USGS STAC (DTM)"
     except Exception as exc:
         return {"error": str(exc)}, "USGS STAC FALLÓ"
+
+
+def _dtm_encadenado(lat: float, lon: float, radio: float,
+                    futuro_stac, aviso) -> dict[str, Any]:
+    """Análisis DTM que ESPERA al futuro del STAC y reutiliza sus items.
+
+    Se lanza al pool al mismo tiempo que la búsqueda STAC, pero no la
+    repite: al llegar su turno hace .result() del futuro (que para entonces
+    ya estará hecho o casi) y arranca con los items en la mano. Si el STAC
+    falló, devuelve un dict de error con fallback a la vía GDS.
+    """
+    try:
+        items, _fuente = futuro_stac.result()
+    except Exception as exc:
+        return {"error": f"STAC falló: {exc}", "fallback": "lolardr"}
+    if isinstance(items, dict) and "error" in items:
+        return {"error": f"STAC falló: {items['error']}",
+                "fallback": "lolardr"}
+    return topografia_dtm.analizar_sitio(lat, lon, radio, items_stac=items,
+                                         aviso=aviso)
 
 
 def _aviso(aviso, mensaje: str) -> None:
@@ -177,6 +206,10 @@ def _resumen_para_registro(resultado: dict[str, Any]) -> dict[str, Any]:
         "n_puntos_lola": topo.get("elevacion_m", {}).get("n")
         if isinstance(topo.get("elevacion_m"), dict) else None,
         "n_observaciones_diviner": term.get("n_observaciones"),
+        # De dónde salió la topografía de esta consulta: 'dtm_kaguya'
+        # (experimento A) o 'lola_gds' (vía clásica/respaldo). Con DTM,
+        # 'n_puntos_lola' cuenta PÍXELES de la malla, no puntos del láser.
+        "via_topografia": topo.get("via"),
     }
     # Se quitan las claves que no tenían dato, para que el resumen sea limpio.
     return {k: v for k, v in resumen.items() if v is not None}
@@ -187,6 +220,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                         lon: float = 0.05,
                         radio: float = 0.05,
                         usar_gds: bool = True,
+                        usar_dtm: bool = True,
                         con_teselas: bool = False,
                         incluir_tierra: bool = False,
                         aviso=None) -> dict[str, Any]:
@@ -200,6 +234,11 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                      PDS tarda desproporcionadamente más con cajas grandes)
       usar_gds       False = salta las consultas GDS (lentas, minutos) y
                      deja solo capas/catálogos; útil para pruebas rápidas
+      usar_dtm       True = en la Luna, la topografía sale del DTM de Kaguya
+                     (GeoTIFF, segundos) cuando el tile cubre bien la caja
+                     (experimento A); si no cubre o falla, cae SOLO ENTONCES
+                     a la vía GDS LOLA (el respaldo clásico). Con
+                     usar_dtm=False se usa siempre la vía LOLA.
       con_teselas    True = añade URLs WMTS listas para Leaflet/MapLibre
                      (2 llamadas HTTP extra por capa visual)
       incluir_tierra True = añade la sección de análogos terrestres (CMR/GIBS)
@@ -258,16 +297,26 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     if cuerpo == "moon" and usar_gds:
         from concurrent.futures import ThreadPoolExecutor
 
-        _aviso(aviso, "En paralelo (4 hilos): catálogo Treks + GDS Diviner + "
-               "GDS LOLA + catálogo STAC... (1ª vez: minutos; con caché: segs)")
+        tareas = "catálogo Treks + GDS Diviner + catálogo STAC"
+        tareas += " + DTM Kaguya" if usar_dtm else " + GDS LOLA"
+        _aviso(aviso, f"En paralelo: {tareas}... "
+               "(1ª vez: minutos; con caché: segs)")
         pool = ThreadPoolExecutor(4)
         futuros = {
             "_pool": pool,
             "capas": pool.submit(_capas_trek, cuerpo, projtype),
             "diviner": pool.submit(termico.datos_diviner, cajas_g),
-            "lola": pool.submit(topografia.elevacion_lola, cajas_g),
-            "dtm": pool.submit(_dtm_de_stac, cuerpo, bbox_s, lat),
+            "dtm_stac": pool.submit(_dtm_de_stac, cuerpo, bbox_s, lat),
         }
+        if usar_dtm:
+            # Experimento A integrado: el análisis DTM se ENCADENA al futuro
+            # del STAC (arranca cuando la búsqueda termina y reutiliza sus
+            # items, sin repetir la llamada). El GDS LOLA NO se lanza: solo
+            # se consultará como fallback si el DTM no cubre la caja.
+            futuros["dtm"] = pool.submit(
+                _dtm_encadenado, lat, lon, radio, futuros["dtm_stac"], aviso)
+        else:
+            futuros["lola"] = pool.submit(topografia.elevacion_lola, cajas_g)
     elif cuerpo != "earth":
         # Marte / pruebas sin GDS: el catálogo se baja en serie como siempre.
         capas_trek, fuente_trek = _capas_trek(cuerpo, projtype)
@@ -279,18 +328,24 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     if cuerpo == "moon":
         res_div: dict[str, Any] = {}
         res_lola: dict[str, Any] = {}
+        res_dtm: dict[str, Any] = {}
+        dtm_precargado: Any = None
 
         if futuros:
-            # Recogemos los resultados del pool paralelo. Las 4 funciones
+            # Recogemos los resultados del pool paralelo. Las funciones
             # internas ya capturan sus propios errores y devuelven dicts de
             # error, así que .result() no debe lanzar nada inesperado.
             res_div = futuros["diviner"].result()
-            res_lola = futuros["lola"].result()
             capas_trek, fuente_trek = futuros["capas"].result()
             resultado["metadatos"]["fuentes"].append(fuente_trek)
-            dtm_precargado, fuente_stac = futuros["dtm"].result()
+            dtm_precargado, fuente_stac = futuros["dtm_stac"].result()
             resultado["metadatos"]["fuentes"].append(fuente_stac)
-            futuros["_pool"].shutdown()
+            if usar_dtm:
+                res_dtm = futuros["dtm"].result()
+            else:
+                res_lola = futuros["lola"].result()
+            # OJO: el pool NO se cierra aquí; si el DTM no sirviera, la
+            # consulta GDS LOLA de respaldo se lanza sobre este mismo pool.
         elif usar_gds:
             # Ruta de respaldo (no debería usarse: el pool se crea siempre
             # que hay GDS lunar, pero queda por robustez).
@@ -307,24 +362,91 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         resultado["termico"] = term
 
         # --- sección topográfica --------------------------------------
-        topo: dict[str, Any] = {"fuente": "LOLA (GDS) + DTM Kaguya (USGS STAC) + Treks"}
-        if res_lola.get("elevacion_m"):
-            topo["elevacion_m"] = res_lola["elevacion_m"]
-            geom = utilidades.pendiente_y_rugosidad(
-                res_lola["puntos"], constantes.RADIO_DATUM_LUNA_M)
-            topo["pendiente"] = geom.get("pendiente_grados")
-            topo["rugosidad"] = geom.get("rugosidad_m")
-            topo["metodo_pendiente_rugosidad"] = geom.get("metodo")
-            topo["crateres_formaciones"] = utilidades.detectar_crateres(
-                res_lola["puntos"], constantes.RADIO_DATUM_LUNA_M)
+        # ¿El DTM sirve para ESTA caja? Exige: sin error, >=50% de píxeles
+        # válidos ('confiable', lo calcula analizar_sitio) y >=90% de la
+        # caja dentro del tile. En los polos NO lo pasa (huecos de sombra:
+        # Malapert medido = 2% de píxeles útiles) y cae al LOLA de siempre.
+        dtm_util = (usar_dtm and bool(res_dtm)
+                    and "error" not in res_dtm
+                    and res_dtm.get("confiable", False)
+                    and res_dtm.get("cobertura_fraccion", 0.0) >= 0.9)
+
+        if dtm_util:
+            # VÍA DTM (experimento A integrado): métricas sobre la malla de
+            # Kaguya, en el MISMO formato que la vía LOLA (ver
+            # topografia_dtm._a_estadisticas). El GDS LOLA ni se consulta.
+            topo: dict[str, Any] = {
+                "fuente": "DTM Kaguya TC (USGS STAC) vía rasterio",
+                "via": "dtm_kaguya",
+                "elevacion_m": res_dtm["elevacion"],
+                "pendiente": res_dtm["pendiente"],
+                "rugosidad": res_dtm["rugosidad"],
+                "metodo_pendiente_rugosidad": (
+                    "gradiente sobre la malla del DTM "
+                    f"(~{res_dtm.get('resolucion_m')} m/píxel); rugosidad = "
+                    "desviación típica dentro de celdas de ~100 m"),
+                "crateres_formaciones": res_dtm.get("crateres") or {},
+                "dtm_detalle": {
+                    "tile": res_dtm.get("tile"),
+                    "resolucion_m": res_dtm.get("resolucion_m"),
+                    "cobertura_fraccion": res_dtm.get("cobertura_fraccion"),
+                    "pixeles_validos_fraccion": res_dtm.get(
+                        "pixeles_validos_fraccion"),
+                    "tile_en_cache": res_dtm.get("de_cache"),
+                    "tiempos_s": {
+                        k: res_dtm.get(k) for k in
+                        ("stac_s", "descarga_s", "computo_s", "total_s")},
+                },
+            }
             topo["crateres_formaciones"]["referencias"] = [
                 {"mapa_geologico_usgs": constantes.URL_MAPA_GEOLOGICO_LUNA},
             ]
+            resultado["metadatos"]["fuentes"].append(
+                "DTM Kaguya (rasterio) — topografía sin tocar el GDS LOLA")
         else:
-            topo["elevacion_m"] = res_lola.get("error",
-                                               "sin datos (usar_gds=False?)")
+            # VÍA LOLA (GDS): la clásica, y respaldo del DTM. Con
+            # usar_dtm=True esta consulta SOLO se lanza ahora (cuando ya se
+            # sabe que el DTM no sirve); si el DTM sirve, el GDS LOLA ni se
+            # molesta (menos carga en el servidor frágil de PDS).
+            if usar_dtm and res_dtm:
+                motivo = res_dtm.get("error") or (
+                    f"cobertura {res_dtm.get('cobertura_fraccion')} · "
+                    "píxeles válidos "
+                    f"{res_dtm.get('pixeles_validos_fraccion')}")
+                _aviso(aviso, f"DTM no usable en este sitio ({motivo}): "
+                       "fallback a GDS LOLA (VARIOS MINUTOS)...")
+                resultado["metadatos"]["fuentes"].append(
+                    f"DTM Kaguya DESCARTADO ({motivo})")
+            if futuros:
+                if usar_dtm:
+                    res_lola = futuros["_pool"].submit(
+                        topografia.elevacion_lola, cajas_g).result()
+                else:
+                    res_lola = futuros["lola"].result()
+            elif usar_gds:
+                _aviso(aviso, "GDS LOLA (elevación): VARIOS MINUTOS...")
+                res_lola = topografia.elevacion_lola(cajas_g)
+
+            topo = {"fuente": "LOLA (GDS) + DTM Kaguya (USGS STAC) + Treks",
+                    "via": "lola_gds"}
+            if res_lola.get("elevacion_m"):
+                topo["elevacion_m"] = res_lola["elevacion_m"]
+                geom = utilidades.pendiente_y_rugosidad(
+                    res_lola["puntos"], constantes.RADIO_DATUM_LUNA_M)
+                topo["pendiente"] = geom.get("pendiente_grados")
+                topo["rugosidad"] = geom.get("rugosidad_m")
+                topo["metodo_pendiente_rugosidad"] = geom.get("metodo")
+                topo["crateres_formaciones"] = utilidades.detectar_crateres(
+                    res_lola["puntos"], constantes.RADIO_DATUM_LUNA_M)
+                topo["crateres_formaciones"]["referencias"] = [
+                    {"mapa_geologico_usgs": constantes.URL_MAPA_GEOLOGICO_LUNA},
+                ]
+            else:
+                topo["elevacion_m"] = res_lola.get(
+                    "error", "sin datos (usar_gds=False?)")
+
+        # El catálogo STAC ya está en mano (paralelo) o se pide ahora.
         if futuros:
-            # El STAC ya se consultó en paralelo; solo se enchufa su resultado.
             topo["dtm_descargables"] = dtm_precargado
         else:
             try:
@@ -336,6 +458,8 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                 topo["dtm_descargables"] = {"error": str(exc)}
         topo["capas_trek"] = topografia.capas_topografia_trek(capas_trek)
         resultado["topografia"] = topo
+        if futuros:
+            futuros["_pool"].shutdown()
 
         # --- sección superficie ---------------------------------------
         resultado["superficie"] = superficie.datos_superficie(res_div, capas_trek)

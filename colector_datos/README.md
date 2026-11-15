@@ -20,10 +20,10 @@ datos["iluminacion"]["zonas_sombra_psr"]
 
 | Parámetro pedido | Módulo | Fuente | ¿Cuántas llamadas? |
 |---|---|---|---|
-| Elevación | `topografia.py` | LOLA por PDS GDS + DTM Kaguya (USGS STAC) | 1 GDS + 1 STAC |
-| Pendiente del terreno | `topografia.py` | **calculada en local** desde los mismos puntos LOLA | 0 extra |
-| Rugosidad superficial | `topografia.py` | **calculada en local** (desv. típica por celda) | 0 extra |
-| Cráteres / formaciones geológicas | `topografia.py` | **calculado en local** (depresiones vs vecinas) + mapa geológico USGS + capas Treks | 0 extra |
+| Elevación | `topografia_dtm.py` / `topografia.py` | **DTM Kaguya (GeoTIFF vía rasterio)** si el tile cubre la caja; si no, LOLA por PDS GDS (respaldo) | 1 STAC + 1 tile (o 1 GDS) |
+| Pendiente del terreno | `topografia_dtm.py` / `topografia.py` | **calculada en local** (gradiente sobre la malla DTM, o pares de celdas sobre los puntos LOLA) | 0 extra |
+| Rugosidad superficial | `topografia_dtm.py` / `topografia.py` | **calculada en local** (desv. típica por celdas de ~100 m) | 0 extra |
+| Cráteres / formaciones geológicas | `topografia_dtm.py` / `topografia.py` | **calculado en local** (depresiones vs vecinas, sobre malla o nube) + mapa geológico USGS + capas Treks | 0 extra |
 | Temperatura media, máx y mín | `termico.py` | Diviner por PDS GDS | 1 GDS |
 | Diferencia térmica día/noche | `termico.py` | mismo CSV Diviner (ángulo cenital solar) | 0 extra |
 | Variación estacional | `termico.py` | mismo CSV Diviner (agrupando por mes) | 0 extra |
@@ -37,23 +37,32 @@ datos["iluminacion"]["zonas_sombra_psr"]
 | Zonas en sombra permanente (PSR) | `iluminacion.py` | capas Treks (PSR) + fracción diurna de Diviner | 0 extra |
 | (lado Tierra) | `analogos_tierra.py` | CMR + GIBS + Copernicus | opcional, ~6 |
 
-**Total Luna: ~7 llamadas HTTP** para todo el diccionario (2 son el propio
-GDS: consulta + CSV, y pueden tardar minutos).
+**Total Luna: ~5 llamadas HTTP** con `usar_dtm=True` (1 STAC + 1 tile Kaguya
+~7 MB dan la topografía completa; el GDS LOLA ni se consulta) y **1 sola
+consulta GDS** (Diviner, que puede tardar minutos). Todo lo cacheado
+(catálogos, tiles, CSV GDS) sale del disco en las corridas siguientes.
 
 ## Archivos
 
 ```
 colector_datos/
   __init__.py          expone obtener_datos_sitio()
-  api.py               ← la función principal que une todo
+  api.py               ← la función principal que une todo (paraleliza y decide vía DTM/LOLA)
   constantes.py        constantes físicas, sitios de ejemplo, palabras clave
   utilidades.py        pendiente, rugosidad, cráteres, distancias, estadísticas
-  topografia.py        elevación (LOLA), DTM (USGS STAC), capas Treks
+  topografia.py        elevación LOLA (GDS), catálogo DTM (STAC), capas Treks
+  topografia_dtm.py    EXPERIMENTO A: topografía desde el DTM Kaguya (rasterio)
   termico.py           Diviner: temperatura + día/noche + estacional + albedo
   superficie.py        tipo de roca, minerales, polvo/regolito
   iluminacion.py       iluminación, energía solar, PSR
   analogos_tierra.py   el lado terrestre de la comparación (CMR/GIBS/S2)
+  cache_gds.py         caché local de los CSV del GDS (Diviner/LOLA)
+  cache_catalogo.py    caché local de catálogos (Treks, STAC)
   ejemplo_uso.py       script de muestra ejecutable
+  prueba_funcion.py    informe legible de un sitio (--sin_dtm para vía LOLA)
+  prueba_tierra.py     informe de análogos terrestres
+  prueba_dtm.py        corrida del experimento A con comparación vs LOLA
+  NOTAS_NOCTURNAS.md   mediciones, veredictos y decisiones (leer antes de mergear)
 ```
 
 ## Cómo ejecutar
@@ -65,6 +74,10 @@ python -m colector_datos.ejemplo_uso              # Shackleton (polo sur lunar)
 python -m colector_datos.ejemplo_uso --rapido     # sin GDS (responde en segundos)
 python -m colector_datos.ejemplo_uso --marte      # Jezero (Marte)
 python -m colector_datos.ejemplo_uso --sitio peary
+
+python -m colector_datos.prueba_funcion --sitio malapert      # informe completo + explicación
+python -m colector_datos.prueba_funcion --lat 41.2 --lon -23.7 --sin_dtm  # vía LOLA (A/B)
+python -m colector_datos.prueba_dtm --lat -23.4 --lon 157.8 --radio 0.05  # piloto DTM vs LOLA
 ```
 
 O desde tu propia aplicación:
@@ -87,17 +100,31 @@ datos = obtener_datos_sitio(
    temperatura (canales 3-9), el albedo (1-2), el día/noche (ángulo solar) y
    la estacionalidad (fecha). Lo mismo con LOLA: una descarga de puntos y
    pendiente/rugosidad/cráteres se calculan en Python, no en la red.
-2. **El catálogo de Treks se baja UNA vez** y todos los módulos lo filtran en
+2. **Topografía por DTM cuando se puede, LOLA cuando hace falta**
+   (`usar_dtm=True` por defecto): el tile Kaguya (~7 MB en S3 estático) da
+   elevación/pendiente/rugosidad/cráteres sobre una malla de 19-30 m/px en
+   segundos; el GDS LOLA (que el servidor fabrica a mano alzada, minutos) solo
+   se consulta si el DTM no cubre la caja (típico en polos: huecos de sombra).
+   La política exacta y sus mediciones están en `NOTAS_NOCTURNAS.md`.
+3. **Paralelismo:** en consultas lunares, catálogo Treks + Diviner + STAC + DTM
+   (o LOLA) se lanzan juntos en un `ThreadPoolExecutor(4)`; el total es el de
+   la llamada más lenta, no la suma.
+4. **Tres cachés locales** (datos históricos: re-bajarlos da lo mismo):
+   `cache_gds.py` (CSV de Diviner/LOLA), `cache_catalogo.py` (Treks/STAC) y
+   los tiles DTM en `data/cache/dtm/`. Primera visita = red; siguientes =
+   disco (medido: sitio nuevo 33 s frío → 4 s tibio).
+5. **El catálogo de Treks se baja UNA vez** y todos los módulos lo filtran en
    memoria (`utilidades.capas_por_keyword`), sin repetir peticiones.
-3. **Una sola llamada STAC** pasa todas las colecciones interesantes a la vez
-   (`bbox` compartido).
-4. **Aislamiento de fallos:** si una fuente cae, la sección del diccionario
-   correspondiente lleva `"error": ...` y el resto sigue funcionando.
-5. **Cajas que cruzan el meridiano 0:** `utilidades.cajas_gds` las parte
-   automáticamente en dos (el GDS las rechaza si no).
-6. **Python básico:** sin numpy ni rasterio para el flujo normal; solo
-   `pandas` (ya requerido por `nsac`). Cada función explica en su docstring
-   qué hace, qué devuelve y de dónde sale cada número.
+6. **Aislamiento de fallos:** si una fuente cae, la sección del diccionario
+   correspondiente lleva `"error": ...` y el resto sigue funcionando; el DTM
+   que no cubre degrada a LOLA sin romper nada.
+7. **Cajas que cruzan el meridiano 0:** `utilidades.cajas_gds` las parte
+   automáticamente en dos y SIEMPRE convierte la longitud al convenio 0-360
+   que exige el GDS (sitios con longitud oeste fallaban antes).
+8. **Python básico:** el flujo normal usa solo `pandas`; `numpy`+`rasterio`
+   se importan SOLO dentro de la vía DTM, y su ausencia degrada a la vía
+   LOLA con un mensaje claro. Cada función explica en su docstring qué hace,
+   qué devuelve y de dónde sale cada número.
 
 ## Peculiaridades de los datos crudos (aprendidas a la dura)
 
@@ -135,12 +162,16 @@ La ruta se cambia con la variable de entorno `NSAC_DATA_DIR` (por defecto
 
 ## Cuánto tarda cada consulta
 
-- Treks, STAC, PDS Search y el lado Tierra: **segundos**.
-- Los CSV crudos del **GDS de PDS** (LOLA/Diviner, solo Luna): **varios
-  minutos por consulta**, y el tiempo crece desproporcionadamente con el
-  área pedida. Por eso `obtener_datos_sitio()` **recorta el radio a ±0.5°**
-  (`constantes.RADIO_MAX_GRADOS`) y lo anota en
-  `metadatos.nota_radio`: para más detalle, divide el sitio en sub-cajas.
+- Treks, STAC, PDS Search y el lado Tierra: **segundos** (y de caché del disco
+  tras la primera consulta del día: `cache_catalogo.py`).
+- **Luna con `usar_dtm=True`:** primera visita ≈ **30-60 s** frío (el techo lo
+  pone el GDS de Diviner; la topografía DTM añade solo 4-8 s). Sitio ya
+  visitado: **~4 s** (medido).
+- **Luna con `usar_dtm=False`:** los CSV crudos del GDS (LOLA/Diviner) tardan
+  **varios minutos por consulta**, y el tiempo crece desproporcionadamente con
+  el área pedida. Por eso `obtener_datos_sitio()` **recorta el radio a ±0.5°**
+  (`constantes.RADIO_MAX_GRADOS`) y lo anota en `metadatos.nota_radio`: para
+  más detalle, divide el sitio en sub-cajas.
 - Si el servidor responde 502/503, la sesión de `nsac.http` reintenta hasta
   3 veces, lo que puede alargar una consulta lenta todavía más.
 
@@ -148,9 +179,16 @@ La ruta se cambia con la variable de entorno `NSAC_DATA_DIR` (por defecto
 
 - El GDS puede tardar **minutos** por consulta; usa `usar_gds=False` para
   pruebas rápidas (catálogos y capas sin datos puntuales).
+- El DTM de Kaguya cubre la caja SIEMPRE que el tile tenga >=50 % de píxeles
+  válidos y >=90 % de la caja dentro del tile; en los **polos** falla por los
+  huecos de sombra (medido: Malapert solo 2 % de píxeles) y el sistema cae
+  automáticamente a la vía GDS LOLA.
+- Un tile DTM cubre cajas de hasta ±0.5° si el tile es grande; cajas que
+  abarquen VARIOS tiles necesitan mosaico (pendiente: hoy se usa 1 tile y la
+  política de cobertura rechaza el resto — ver NOTAS_NOCTURNAS.md).
 - En Marte no existen LOLA/Diviner: la temperatura puntual requiere descargar
   productos THEMIS/TES de PDS ODE (el módulo lo anota y da las capas Treks).
-- La detección de cráteres con la nube de puntos LOLA es una **heurística de
-  cribado**; para confirmar cráteres usa el DTM del STAC o el mapa geológico.
+- La detección de cráteres (malla o nube de puntos) es una **heurística de
+  cribado**; para confirmar cráteres usa el mapa geológico USGS.
 - `tipo_roca` es una clasificación por umbral de albedo (anortosita/basalto);
   crúzala con las capas de FeO/TiO₂ de Clementine para el informe final.

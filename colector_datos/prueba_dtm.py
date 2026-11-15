@@ -53,11 +53,12 @@ def main() -> None:
 
     elev = res["elevacion"]
     print(f"\nElevación (m): min {elev['min']} · media {elev['media']} · "
-          f"mediana {elev['mediana']} · max {elev['max']} · std {elev['std']}"
-          f"  ({elev['n_pixeles']} px)")
+          f"mediana {elev['mediana']} · max {elev['max']} · "
+          f"desv {elev['desv_estandar']}"
+          f"  ({elev['n']} píxeles)")
     pen = res["pendiente"]
     print(f"Pendiente (grados): media {pen['media']} · mediana {pen['mediana']}"
-          f" · max {pen['max']}  ({pen['n_pixeles']} px)")
+          f" · max {pen['max']}  ({pen['n']} px)")
     rug = res["rugosidad"]
     if "nota" in rug:
         print(f"Rugosidad: {rug['nota']}")
