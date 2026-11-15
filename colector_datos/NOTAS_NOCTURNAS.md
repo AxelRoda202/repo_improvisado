@@ -435,11 +435,38 @@ otro dispositivo: -2389.3 / 0.442 / 0.905 — el GDS es determinista).*
 
 1. ~~Corrida D (fallback polar real)~~ → HECHA, ver §9.3.
 2. ~~Línea base LOLA del sitio medio~~ → HECHA, ver §9.2 (tabla actualizada).
-3. Merge a `master`: la rama `dtm-rasterio` ahora contiene D+E+cache de
+3. Merge a `master`: la rama `dtm-rasterio` ahora contiene D+E+caché de
    catálogos+integración A con fallback verificado. Todo aditivo y
-   reversible (usar_dtm=False restaura el comportamiento de antes).
-4. Ideas NO implementadas (por alcance, documentadas para no perderlas):
-   mosaico multi-tile para cajas grandes (hoy 1 tile + política de
-   cobertura), cráteres por segmentación del DTM (la heurística actual es
-   de cribado), TTL en catálogos, elevación marciana vía rasterio (los
-   DTMs de HiRISE/CTX del STAC usan la misma receta).
+   reversible (`usar_dtm=False` restaura el comportamiento de antes).
+   Recomendación fuerte de mergear: cumple exactamente el plan que se
+   pidió (D+E primero, A integrada con respaldo) y está medido en 5
+   escenarios reales (§9.4).
+4. Empujar la rama al remoto (ver §11: no se pudo desde aquí).
+
+## 11. Estado del repositorio (importante para la mañana)
+
+- Todos los cambios de esta noche están COMITEADOS en la rama local
+  `dtm-rasterio` (commits `dbfdb66`, `eaf2797`, `26095e3`).
+- **NO se pudo hacer `git push`**: este dispositivo usa credenciales de
+  GitHub de `escudero819`, y el repo (`github.com/AxelRoda202/
+  repo_improvisado`) responde 403 (permiso denegado). Opciones:
+  a) Axel empuja la rama desde SU dispositivo (donde sí tiene credencial),
+  b) o Axel añade a `escudero819` como colaborador del repo,
+  c) o se configura aquí una credencial de Axel (PAT) para el push.
+- `git log --oneline` en `dtm-rasterio` debe mostrar la secuencia:
+  optimización GDS (D+E) → piloto DTM → fix f-strings → integración A +
+  caché de catálogos → endurecimiento del GDS. Si falta alguno, el
+  trabajo de esta noche no está en esa máquina.
+
+## 12. Ideas NO implementadas (por alcance, documentadas para no perderlas)
+
+- Mosaico multi-tile para cajas grandes (hoy se usa 1 tile y la política
+  de cobertura rechaza el resto; con mosaico, ±0.5° completos por DTM).
+- Cráteres por segmentación del DTM (la heurística actual es de cribado:
+  depresiones de >1.5σ; los candidatos de malla y de nube no son 1:1).
+- TTL opcional en los catálogos (hoy sin caducidad, como la caché GDS).
+- Elevación MARCIANA vía rasterio: los DTMs de HiRISE/CTX del STAC usan
+  la misma receta del piloto (CRS marciano IAU + window read); faltó
+  tiempo para probarla, y en Marte la elevación puntual hoy no existe.
+- Diviner sigue siendo el cuello de botella frío (33-134 s según carga
+  del servidor): no hay alternativa medida, es temperatura REAL.
