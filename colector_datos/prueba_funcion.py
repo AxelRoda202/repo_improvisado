@@ -149,8 +149,7 @@ def mostrar_topografia(t: dict) -> None:
             "PENDIENTE DEL TERRENO", pend, "grados",
             "0° = plano como una mesa; <7° apto para aterrizar; >15° = "
             "peligroso para rovers y edificios.")
-        print(f"    veredicto       : {clasifica(pend['media'], [
-            (7, 'FAVORABLE: terreno llano', 'INCLINADO: exige trabajos de nivelación')])}")
+        print(f"    veredicto       : {clasifica(pend['media'], [(7, 'FAVORABLE: terreno llano', 'INCLINADO: exige trabajos de nivelación')])}")
     else:
         linea("pendiente", "sin datos", pend.get("nota", "") if isinstance(pend, dict) else "")
 
@@ -160,8 +159,7 @@ def mostrar_topografia(t: dict) -> None:
             "RUGOSIDAD SUPERFICIAL", rugo, "m",
             "desviación típica de la altura dentro de celdas de 100 m. "
             "<1 m liso; 1-5 m moderado; >5 m = bloques y ondulaciones.")
-        print(f"    veredicto       : {clasifica(rugo['media'], [
-            (5, 'MANEJABLE', 'RUGOSO: riesgo de aterrizaje')])}")
+        print(f"    veredicto       : {clasifica(rugo['media'], [(5, 'MANEJABLE', 'RUGOSO: riesgo de aterrizaje')])}")
     else:
         linea("rugosidad", "sin datos", "")
 
