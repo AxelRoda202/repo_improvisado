@@ -5,16 +5,24 @@ todos los demás módulos. Tenerlos centralizados evita repetirlos y facilita
 cambiar un sitio de estudio o un umbral en un único sitio.
 """
 
-import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # 0. Dónde vive el registro de consultas
 # ---------------------------------------------------------------------------
 
-# Cada llamada a obtener_datos_sitio() deja una entrada en este JSON (en la
-# misma carpeta 'data' que usa nsac.http). Si la carpeta no existe, se crea.
-RUTA_REGISTRO = Path(os.getenv("NSAC_DATA_DIR", "data")) / "registro_sitios.json"
+# Cada llamada a obtener_datos_sitio() deja una entrada en este JSON. Vive en
+# la subcarpeta 'data' DENTRO de colector_datos, para que todo lo que genera
+# el colector quede junto. Si la carpeta no existe, se crea.
+RUTA_REGISTRO = (Path(__file__).resolve().parent / "data"
+                 / "registro_sitios.json")
+
+# Tope del semiancho de la caja (en grados). El GDS de PDS genera los CSV
+# sobre la marcha en su servidor y el tiempo crece DESPROPORCIONADAMENTE con
+# el área: una caja de ±0.2° tarda ~10 min, una de ±1° puede tardar HORAS
+# (y además reintenta 3 veces si el servidor devuelve 502/503). Por eso se
+# recorta y se avisa: para más detalle, divide en sub-cajas más pequeñas.
+RADIO_MAX_GRADOS = 0.5
 
 # ---------------------------------------------------------------------------
 # 1. Constantes físicas (valores estándar, sin llamadas a ninguna API)
@@ -23,6 +31,10 @@ RUTA_REGISTRO = Path(os.getenv("NSAC_DATA_DIR", "data")) / "registro_sitios.json
 # Irradiancia solar en el borde de la atmósfera terrestre, en W/m².
 # La Luna está ~1 UA del Sol (igual que la Tierra), así que sirve para ambos.
 IRRADIANCIA_SOLAR_WM2 = 1361.0
+
+# Marte orbita a ~1.52 UA: su 'constante solar' es 1361/1.52² ≈ 586 W/m².
+# Usar el valor terrestre inflaría la energía solar marciana 2.3 veces.
+IRRADIANCIA_SOLAR_MARTE_WM2 = 586.0
 
 # Radio del datum lunar (esferoide de referencia de LOLA/MOLA equivalente),
 # en metros. La "elevación" de un punto LOLA es su radio menos este valor.
@@ -99,8 +111,12 @@ PALABRAS_CLAVE_CAPAS = {
     "geologia": ["geolog", "formation", "unit", "map"],
     "temperatura": ["temp", "themis", "bolometric", "heat flow"],
     "albedo": ["albedo", "reflect", "brightness", "clementine"],
+    # 'crism/omega/tes' son los espectrómetros marcianos; 'olivine',
+    # 'carbonate', 'chloride', 'sulfate' y 'hematite' son los minerales
+    # clave de la geología marciana (y Kaguya mapea olivina también en Luna).
     "minerales": ["mineral", "iron", "titanium", "feo", "tio2", "element",
-                  "thorium", "composition", "spectra"],
+                  "thorium", "composition", "spectra", "crism", "omega",
+                  "olivine", "carbonate", "chloride", "sulfate", "hematite"],
     "polvo": ["dust", "h-parameter", "h param", "regolith", "soil"],
     "iluminacion": ["illum", "light", "insolat", "sun"],
     "sombra": ["psr", "shadow", "permanently"],

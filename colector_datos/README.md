@@ -119,8 +119,9 @@ datos = obtener_datos_sitio(
 ## Registro de consultas
 
 Cada llamada a `obtener_datos_sitio()` deja (o actualiza) su entrada en
-**`data/registro_sitios.json`** — un JSON con una entrada por sitio, cuya
-clave es `cuerpo@lat,lon±radio` (p.ej. `moon@-89.9,0.05±0.05`). Cada entrada
+**`colector_datos/data/registro_sitios.json`** — un JSON con una entrada por
+sitio, cuya clave es `cuerpo@lat,lon±radio` (p.ej. `moon@-89.9,0.05±0.05`).
+También se registran las consultas de TIERRA (`--cuerpo tierra`). Cada entrada
 guarda:
 
 - `fecha_consulta`: cuándo se pidió (repetir la consulta refresca la fecha).
@@ -130,7 +131,18 @@ guarda:
   cruda de puntos LOLA, que queda resumida en `n_puntos`).
 
 La ruta se cambia con la variable de entorno `NSAC_DATA_DIR` (por defecto
-`data/` junto a la raíz del proyecto).
+`colector_datos/data/`).
+
+## Cuánto tarda cada consulta
+
+- Treks, STAC, PDS Search y el lado Tierra: **segundos**.
+- Los CSV crudos del **GDS de PDS** (LOLA/Diviner, solo Luna): **varios
+  minutos por consulta**, y el tiempo crece desproporcionadamente con el
+  área pedida. Por eso `obtener_datos_sitio()` **recorta el radio a ±0.5°**
+  (`constantes.RADIO_MAX_GRADOS`) y lo anota en
+  `metadatos.nota_radio`: para más detalle, divide el sitio en sub-cajas.
+- Si el servidor responde 502/503, la sesión de `nsac.http` reintenta hasta
+  3 veces, lo que puede alargar una consulta lenta todavía más.
 
 ## Limitaciones conocidas
 

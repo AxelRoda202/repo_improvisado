@@ -153,13 +153,40 @@ def _resumen_por_celda(puntos, celda_m):
         media = sum(radios) / n
         desv = math.sqrt(sum((r - media) ** 2 for r in radios) / n) if n > 1 else 0.0
         resumenes.append({
-            "x": (col + 0.5) * celda_m,      # centro de la celda
+            "fila": fila,                    # posición en la cuadrícula:
+            "col": col,                      # permite buscar vecinos sin
+            "x": (col + 0.5) * celda_m,      # comparar todas contra todas
             "y": (fila + 0.5) * celda_m,
             "media_m": media,
             "desv_m": desv,
             "n": n,
         })
     return resumenes
+
+
+def _vecindario(indice: dict[tuple[int, int], dict], celda: dict,
+                alcance: int) -> list[tuple[dict, float, int, int]]:
+    """Vecinos de UNA celda mirando solo el cuadrado ±`alcance` de la rejilla.
+
+    Antes se comparaban TODAS las celdas contra todas (O(n²)): con cajas
+    grandes eso son miles de millones de operaciones y el programa parecía
+    colgado durante horas. Como las celdas viven en una cuadrícula regular
+    de lado `celda_m`, ningún vecino cercano puede caer fuera del cuadrado
+    de ±alcance: basta con mirar ahí.
+
+    Devuelve (celda_vecina, distancia_m, df, dc) sin contar la propia celda.
+    """
+    vecinos: list[tuple[dict, float, int, int]] = []
+    f0, c0 = celda["fila"], celda["col"]
+    for df in range(-alcance, alcance + 1):
+        for dc in range(-alcance, alcance + 1):
+            if df == 0 and dc == 0:
+                continue
+            otra = indice.get((f0 + df, c0 + dc))
+            if otra is not None:
+                d = math.hypot(otra["x"] - celda["x"], otra["y"] - celda["y"])
+                vecinos.append((otra, d, df, dc))
+    return vecinos
 
 
 def _con_coordenadas_locales(puntos, radio_cuerpo_m):
@@ -200,28 +227,32 @@ def pendiente_y_rugosidad(puntos: list[dict[str, float]],
 
     puntos, _centro = _con_coordenadas_locales(puntos, radio_cuerpo_m)
     celdas = _resumen_por_celda(puntos, celda_m)
+    indice = {(c["fila"], c["col"]): c for c in celdas}
+    # Cuántas celdas de rejilla equivalen a la distancia máxima de búsqueda.
+    alcance = int(math.ceil(distancia_max_m / celda_m))
 
     # Rugosidad: solo celdas con >=3 puntos (una medida aislada no define
     # "variación").
     rugosidades = [c["desv_m"] for c in celdas if c["n"] >= 3]
 
-    # Pendiente: pares de celdas cercanas (todas contra todas, con tope de
-    # distancia; con <100 celdas es rápido y evita índices complicados).
+    # Pendiente: pares de celdas cercanas. Cada par se cuenta UNA vez
+    # (solo "medio plano": df>0, o df==0 y dc>0), porque la pendiente entre
+    # a y b es la misma que entre b y a.
     pendientes = []
-    for a in celdas:
-        for b in celdas:
-            if a is b:
+    for c in celdas:
+        for otra, d, df, dc in _vecindario(indice, c, alcance):
+            if d > distancia_max_m:
                 continue
-            d = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
-            if 0 < d <= distancia_max_m:
-                pendientes.append(math.degrees(
-                    math.atan2(abs(a["media_m"] - b["media_m"]), d)))
+            if df < 0 or (df == 0 and dc <= 0):
+                continue
+            pendientes.append(math.degrees(
+                math.atan2(abs(c["media_m"] - otra["media_m"]), d)))
 
     return {
         "metodo": (f"celdas de {celda_m:.0f} m en proyección local; "
                    "rugosidad = desviación típica dentro de celda; "
                    "pendiente = atan2(Δh, d) entre celdas a menos de "
-                   f"{distancia_max_m:.0f} m"),
+                   f"{distancia_max_m:.0f} m (búsqueda por rejilla)"),
         "n_puntos": len(puntos),
         "n_celdas": len(celdas),
         "rugosidad_m": util_estad(rugosidades),
@@ -262,6 +293,9 @@ def detectar_crateres(puntos: list[dict[str, float]],
         return {"nota": "la caja es demasiado pequeña para esta resolución",
                 "candidatos": []}
 
+    indice = {(c["fila"], c["col"]): c for c in celdas}
+    alcance = int(math.ceil(radio_busqueda_m / celda_m))
+
     global_media = sum(c["media_m"] for c in celdas) / len(celdas)
     global_desv = math.sqrt(
         sum((c["media_m"] - global_media) ** 2 for c in celdas) / len(celdas))
@@ -277,9 +311,9 @@ def detectar_crateres(puntos: list[dict[str, float]],
     candidatos = []
     for c in celdas:
         vecinos = [
-            o["media_m"] for o in celdas
-            if o is not c
-            and math.hypot(c["x"] - o["x"], c["y"] - o["y"]) <= radio_busqueda_m
+            otra["media_m"]
+            for otra, d, _df, _dc in _vecindario(indice, c, alcance)
+            if d <= radio_busqueda_m
         ]
         if len(vecinos) < 4:
             continue

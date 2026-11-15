@@ -42,20 +42,22 @@ def fraccion_diurna(res_diviner: dict[str, Any] | None) -> float | None:
 # 2. Energía solar recibida (cálculo local, sin llamadas)
 # ---------------------------------------------------------------------------
 
-def energia_solar_media_wm2(faccion_iluminada: float | None) -> dict[str, Any]:
-    """E ≈ S0 × fracción de superficie iluminada (Luna/Marte, sin atmósfera).
+def energia_solar_media_wm2(faccion_iluminada: float | None,
+                            cuerpo: str = "moon") -> dict[str, Any]:
+    """E ≈ S0 × fracción de superficie iluminada (sin atmósfera apreciable).
 
-    S0 = 1361 W/m² a 1 UA. La distancia Tierra-Sol varía ±3.4 % en el año y
-    Marte está más lejos (S0 marciano ≈ 590 W/m²), pero para comparar sitios
-    dentro del mismo cuerpo el efecto es de segundo orden y lo anotamos.
+    S0 depende del cuerpo: 1361 W/m² a 1 UA (Luna/Tierra) y ≈586 W/m² en
+    Marte (orbita a ~1.52 UA). Usar el valor terrestre para Marte inflaría
+    la energía estimada 2.3 veces.
     """
+    s0 = (constantes.IRRADIANCIA_SOLAR_MARTE_WM2 if cuerpo == "mars"
+          else constantes.IRRADIANCIA_SOLAR_WM2)
     detalle: dict[str, Any] = {
-        "constante_solar_wm2": constantes.IRRADIANCIA_SOLAR_WM2,
+        "constante_solar_wm2": s0,
         "formula": "E = S0 × fracción_iluminada",
     }
     if faccion_iluminada is not None:
-        detalle["energia_media_estimada_wm2"] = round(
-            constantes.IRRADIANCIA_SOLAR_WM2 * faccion_iluminada, 1)
+        detalle["energia_media_estimada_wm2"] = round(s0 * faccion_iluminada, 1)
     else:
         detalle["nota"] = ("sin fracción iluminada; usa las capas de "
                            "iluminación de Treks para el mapa anual")
@@ -67,8 +69,13 @@ def energia_solar_media_wm2(faccion_iluminada: float | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def datos_iluminacion(capas: list[dict[str, Any]],
-                      res_diviner: dict[str, Any] | None) -> dict[str, Any]:
-    """Capas de iluminación y PSR + fracción diurna + energía solar."""
+                      res_diviner: dict[str, Any] | None,
+                      cuerpo: str = "moon") -> dict[str, Any]:
+    """Capas de iluminación y PSR + fracción diurna + energía solar.
+
+    `cuerpo` ajusta la constante solar (Marte recibe ~43 % de la que llega
+    a la Luna/Tierra por estar más lejos del Sol).
+    """
     pc = constantes.PALABRAS_CLAVE_CAPAS
 
     seccion: dict[str, Any] = {
@@ -89,6 +96,7 @@ def datos_iluminacion(capas: list[dict[str, Any]],
                      "Trek; aquí damos las capas y, si hubo datos Diviner, "
                      "el indicio de fracción diurna."),
         },
-        "energia_solar": energia_solar_media_wm2(fraccion_diurna(res_diviner)),
+        "energia_solar": energia_solar_media_wm2(
+            fraccion_diurna(res_diviner), cuerpo),
     }
     return seccion

@@ -75,12 +75,15 @@ def bundles_minerales() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def datos_superficie(res_diviner: dict[str, Any] | None,
-                     capas: list[dict[str, Any]]) -> dict[str, Any]:
+                     capas: list[dict[str, Any]],
+                     cuerpo: str = "moon") -> dict[str, Any]:
     """Une albedo (Diviner), minerales (Treks + PDS) y polvo/regolito.
 
     `res_diviner` es lo que devuelve `termico.datos_diviner(...)`: de ahí
     cogemos 'reflectancia_albedo' sin gastar ni una llamada más.
     `capas` es el catálogo de Treks ya en memoria.
+    `cuerpo`: en Marte NO se consultan los bundles de Clementine (es una
+    sonda LUNAR; los mapas mineralógicos marcianos son CRISM/OMEGA/TES).
     """
     res_diviner = res_diviner or {}
     pc = constantes.PALABRAS_CLAVE_CAPAS
@@ -98,21 +101,38 @@ def datos_superficie(res_diviner: dict[str, Any] | None,
     }
 
     # --- minerales predominantes -------------------------------------------
-    seccion["minerales_predominantes"] = {
-        "capas_trek": utilidades.capas_por_keyword(capas, pc["minerales"]),
-        "bundles_pds": bundles_minerales(),
-        "nota": ("Clementine UVVIS: albedo y abundancia relativa de Fe/Ti. "
-                 "Lunar Prospector: Th, K, Fe. Ambos están indexados en PDS "
-                 "y varios mapas aparecen como capas de Treks."),
-    }
+    if cuerpo == "mars":
+        seccion["minerales_predominantes"] = {
+            "capas_trek": utilidades.capas_por_keyword(capas, pc["minerales"]),
+            "bundles_pds": [],   # Clementine/LP son lunares: no aplica
+            "nota": ("Los mapas mineralógicos marcianos salen de CRISM "
+                     "(MRO), OMEGA (MEX) y TES (MGS): se eligen por las "
+                     "capas de Mars Trek de arriba; para PDS busca los "
+                     "bundles mro-m-cris o mex-m-omega."),
+        }
+    else:
+        seccion["minerales_predominantes"] = {
+            "capas_trek": utilidades.capas_por_keyword(capas, pc["minerales"]),
+            "bundles_pds": bundles_minerales(),
+            "nota": ("Clementine UVVIS: albedo y abundancia relativa de "
+                     "Fe/Ti. Lunar Prospector: Th, K, Fe. Ambos están "
+                     "indexados en PDS y varios mapas aparecen como capas "
+                     "de Treks."),
+        }
 
     # --- materiales superficiales y depósitos de polvo ----------------------
+    if cuerpo == "mars":
+        nota_polvo = ("Los depósitos de polvo marciano se mapean con TES/"
+                      "THEMIS (capas de Mars Trek): el índice de recubrimiento "
+                      "de polvo separa rocas recién barridas de zonas "
+                      "empolvadas, clave para rodar sin atascarse.")
+    else:
+        nota_polvo = ("Toda la superficie lunar está cubierta de regolito "
+                      "(polvo de impacto); los mapas de parámetro H (Lucey) "
+                      "cuantifican su 'madurez'.")
     seccion["materiales_y_polvo"] = {
         "capas_trek": utilidades.capas_por_keyword(capas, pc["polvo"]),
-        "nota": ("Toda la superficie lunar está cubierta de regolito (polvo "
-                 "de impacto); los mapas de parámetro H (Lucey) cuantifican "
-                 "su 'madurez'. En Marte los depósitos de polvo se mapean "
-                 "con TES/THEMIS (capas de Mars Trek)."),
+        "nota": nota_polvo,
     }
 
     return seccion

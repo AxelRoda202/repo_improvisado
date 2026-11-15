@@ -2,10 +2,11 @@
 
 Ejecútalo desde la raíz del proyecto:
 
-    python -m colector_datos.prueba_funcion                      # Shackleton
+    python -m colector_datos.prueba_funcion                      # default: Extranio (Gale)
     python -m colector_datos.prueba_funcion --sitio malapert     # presets
     python -m colector_datos.prueba_funcion --cuerpo marte --lat 18.4 --lon 77.6
     python -m colector_datos.prueba_funcion --lat -86.0 --lon 0.7 --radio 0.2
+    python -m colector_datos.prueba_funcion --cuerpo tierra --lat 12.3 --lon 45.6
 
 Las consultas de datos crudos (GDS de PDS) tardan MINUTOS: es lo normal.
 
@@ -125,7 +126,8 @@ def motivo_sin_datos(valor: object, pista: str = "") -> str:
 
 def mostrar_topografia(t: dict) -> None:
     barra("TOPOGRAFÍA  (¿se puede aterrizar y circular aquí?)")
-    print("  Fuente: puntos del láser LOLA (NASA LRO) + DTM Kaguya (USGS).")
+    print("  Fuente: " + (t.get("fuente")
+          or "puntos del láser LOLA (NASA LRO) + DTM Kaguya (USGS)."))
 
     elev = t.get("elevacion_m")
     if isinstance(elev, dict) and "media" in elev:
@@ -133,6 +135,9 @@ def mostrar_topografia(t: dict) -> None:
             "ELEVACIÓN", elev, "m",
             "altura sobre el nivel de referencia del cuerpo. Solo sirve para "
             "comparar entre sitios: no hay 'mejor' elevación absoluta.")
+    elif t.get("nota_elevacion"):
+        # Marte no tiene servicio tipo GDS: la elevación puntual exige un DTM.
+        print(f"  Elevación: sin datos puntuales → {t['nota_elevacion']}")
     else:
         print("  Elevación: sin datos → "
               + motivo_sin_datos(elev, "la caja no atrapó puntos LOLA: "
@@ -185,7 +190,8 @@ def mostrar_topografia(t: dict) -> None:
 
 def mostrar_termico(t: dict) -> None:
     barra("TÉRMICA  (¿cuánto frío/calor tendremos que aguantar?)")
-    print("  Fuente: radiómetro Diviner (NASA LRO), canales térmicos 3-9.")
+    print("  Fuente: " + (t.get("fuente")
+          or "radiómetro Diviner (NASA LRO), canales térmicos 3-9."))
 
     temp = t.get("temperatura_superficial")
     if isinstance(temp, dict) and "media" in temp:
@@ -201,10 +207,14 @@ def mostrar_termico(t: dict) -> None:
               + ("FRÍO EXTREMO: aislamiento y calefacción críticos"
                  if temp["media"] < 200 else "MODERADO para el cuerpo"))
     else:
-        fallo = t.get("error") or temp
-        print("  Temperatura: sin datos → "
-              + motivo_sin_datos(fallo, "repite la consulta: el GDS a veces "
-              "se traba, o la caja no atrapó observaciones"))
+        # Marte no tiene GDS: su sección trae una 'nota' que lo explica.
+        if t.get("nota"):
+            print(f"  Temperatura: sin datos crudos → {t['nota']}")
+        else:
+            fallo = t.get("error") or temp
+            print("  Temperatura: sin datos → "
+                  + motivo_sin_datos(fallo, "repite la consulta: el GDS a "
+                  "veces se traba, o la caja no atrapó observaciones"))
 
     dn = t.get("dia_noche")
     if isinstance(dn, dict) and "diferencia_k" in dn:
@@ -306,7 +316,8 @@ def main() -> None:
     parser.add_argument("--sitio", default="Extranio",
                         choices=list(constantes.SITIOS),
                         help="sitio de constantes.SITIOS a caracterizar")
-    parser.add_argument("--cuerpo", default=None, choices=["luna", "marte"],
+    parser.add_argument("--cuerpo", default=None,
+                        choices=["luna", "marte", "tierra"],
                         help="cuerpo para coordenadas propias (con --lat --lon)")
     parser.add_argument("--lat", type=float, default=None,
                         help="latitud propia (junto a --lon)")
@@ -339,7 +350,7 @@ def main() -> None:
     print("#  Qué vas a ver: el diccionario de obtener_datos_sitio() traducido")
     print("#  a un informe: cada número con su unidad y su lectura para el reto.")
     print("#")
-    print("#  La consulta queda registrada en data/registro_sitios.json")
+    print("#  La consulta queda registrada en colector_datos/data/")
     print("#" * 72)
 
     print("\nConsultando fuentes... (Treks y STAC responden en segundos; los")
@@ -354,6 +365,7 @@ def main() -> None:
         lon=lon,
         radio=radio,
         usar_gds=True,   # siempre completo: los GDS traen los datos crudos
+        aviso=print,     # informa cada etapa (las GDS tardan varios minutos)
     )
 
     print(f"Listo en {round(time.time() - t0)} s.\n")
@@ -364,10 +376,21 @@ def main() -> None:
         print(f"  · {fuente}")
     print(f"  · registro      : {m.get('registro', 'no se guardó')}")
 
-    mostrar_topografia(datos.get("topografia", {}))
-    mostrar_termico(datos.get("termico", {}))
-    mostrar_superficie(datos.get("superficie", {}))
-    mostrar_iluminacion(datos.get("iluminacion", {}))
+    if cuerpo != "tierra":
+        # Las secciones de abajo son para Luna/Marte; en Tierra el bloque
+        # útil es el de análogos (se muestra tras esta comprobación).
+        mostrar_topografia(datos.get("topografia", {}))
+        mostrar_termico(datos.get("termico", {}))
+        mostrar_superficie(datos.get("superficie", {}))
+        mostrar_iluminacion(datos.get("iluminacion", {}))
+
+    if "analogos_tierra" in datos:
+        # Cuando el cuerpo es 'tierra', lo que baja es el catálogo de
+        # análogos terrestres (CMR/GIBS/Copernicus); se muestra con el
+        # presentador que ya existe en prueba_tierra.py.
+        from .prueba_tierra import mostrar_tierra
+        barra("ANÁLOGOS TIERRA  (catálogo de datasets terrestres)")
+        mostrar_tierra(datos["analogos_tierra"], lat, lon)
 
     barra("CÓMO USAR ESTO EN LA COMPETENCIA")
     print("  1. Cada bloque de arriba = un criterio del enunciado")

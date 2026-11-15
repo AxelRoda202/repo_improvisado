@@ -45,9 +45,22 @@ from . import (
 )
 
 
+def _aviso(aviso, mensaje: str) -> None:
+    """Informa del avance si el llamador pasó una función `aviso` (p.ej. print).
+
+    Las etapas GDS tardan VARIOS MINUTOS en el servidor de PDS (genera los
+    CSV a mano alzada): sin estos avisos el programa parece colgado.
+    """
+    if callable(aviso):
+        try:
+            aviso(mensaje)
+        except Exception:
+            pass  # un aviso nunca debe romper la consulta
+
+
 def guardar_en_registro(resultado: dict[str, Any],
                         ruta: str | None = None) -> Any:
-    """Guarda la consulta en el registro `data/registro_sitios.json`.
+    """Guarda la consulta en el registro `colector_datos/data/registro_sitios.json`.
 
     El registro es un JSON con una entrada POR SITIO (la clave incluye
     cuerpo, lat, lon y radio, p.ej. 'moon@-89.9,0.05±0.05'), así que si
@@ -65,6 +78,7 @@ def guardar_en_registro(resultado: dict[str, Any],
     (permisos, disco), devuelve el detalle del fallo y la consulta sigue.
     """
     import json
+    import os
     import shutil
     from pathlib import Path
 
@@ -97,9 +111,11 @@ def guardar_en_registro(resultado: dict[str, Any],
     }
 
     ruta.parent.mkdir(parents=True, exist_ok=True)
-    # Escritura segura: se escribe a un temporal y se reemplaza, para no
-    # dejar el registro corrupto a medias si el programa se corta.
-    temporal = ruta.with_suffix(".json.tmp")
+    # Escritura segura: se escribe a un temporal (con el PID en el nombre,
+    # para que dos consultas simultáneas no pisen el mismo archivo) y se
+    # reemplaza, para no dejar el registro corrupto a medias si el programa
+    # se corta.
+    temporal = ruta.with_suffix(f".{os.getpid()}.tmp")
     temporal.write_text(json.dumps(registro, indent=2, ensure_ascii=False),
                         encoding="utf-8")
     shutil.move(str(temporal), str(ruta))
@@ -149,24 +165,33 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                         radio: float = 0.05,
                         usar_gds: bool = True,
                         con_teselas: bool = False,
-                        incluir_tierra: bool = False) -> dict[str, Any]:
+                        incluir_tierra: bool = False,
+                        aviso=None) -> dict[str, Any]:
     """Devuelve el diccionario completo de parámetros para UN sitio.
 
     Parámetros:
-      cuerpo         'luna' | 'marte' (| 'tierra' usa datos_tierra)
+      cuerpo         'luna' | 'marte' | 'tierra'
       lat, lon       centro del sitio en grados
-      radio          semiancho de la caja de búsqueda, en grados
+      radio          semiancho de la caja de búsqueda, en grados. Se recorta
+                     a constantes.RADIO_MAX_GRADOS si lo supera (el GDS de
+                     PDS tarda desproporcionadamente más con cajas grandes)
       usar_gds       False = salta las consultas GDS (lentas, minutos) y
                      deja solo capas/catálogos; útil para pruebas rápidas
       con_teselas    True = añade URLs WMTS listas para Leaflet/MapLibre
                      (2 llamadas HTTP extra por capa visual)
       incluir_tierra True = añade la sección de análogos terrestres (CMR/GIBS)
+      aviso          función opcional (p.ej. print) para informar del avance
+                     etapa por etapa; las etapas GDS tardan VARIOS MINUTOS
 
     Uso típico:
       from colector_datos import obtener_datos_sitio
       datos = obtener_datos_sitio("luna", -89.9, 0.05, 0.05)
     """
     cuerpo = utilidades.normalizar_cuerpo(cuerpo)
+
+    # Tope de caja: ver comentario de RADIO_MAX_GRADOS en constantes.py.
+    radio_original = radio
+    radio = min(radio, constantes.RADIO_MAX_GRADOS)
 
     resultado: dict[str, Any] = {
         "metadatos": {
@@ -182,6 +207,11 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         "superficie": {},
         "iluminacion": {},
     }
+    if radio != radio_original:
+        resultado["metadatos"]["nota_radio"] = (
+            f"radio recortado de ±{radio_original}° a ±{radio}°: cajas más "
+            "grandes pueden tardar HORAS en el GDS de PDS; divide en "
+            "sub-cajas para más detalle")
 
     cajas_g = utilidades.cajas_gds(lat, lon, radio)   # (minlat, maxlat, o, e)
     bbox_s = utilidades.caja_stac(lat, lon, radio)    # (o, s, e, n)
@@ -190,16 +220,18 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     # ------------------------------------------------------------------
     # 1) Catálogo de capas Treks: UNA llamada, se reutiliza en todos los
     #    módulos (topografía, minerales, polvo, iluminación, PSR).
+    #    (Solo Luna/Marte: la Tierra no tiene catálogo Treks.)
     # ------------------------------------------------------------------
     from nsac.sources import trek
 
-    try:
-        capas_trek = trek.layers(cuerpo, projtype=projtype)
-        resultado["metadatos"]["fuentes"].append(
-            f"Treks ({len(capas_trek)} capas, proyección {projtype})")
-    except Exception as exc:
-        capas_trek = []
-        resultado["metadatos"]["fuentes"].append(f"Treks FALLÓ: {exc}")
+    capas_trek: list[dict[str, Any]] = []
+    if cuerpo != "earth":
+        try:
+            capas_trek = trek.layers(cuerpo, projtype=projtype)
+            resultado["metadatos"]["fuentes"].append(
+                f"Treks ({len(capas_trek)} capas, proyección {projtype})")
+        except Exception as exc:
+            resultado["metadatos"]["fuentes"].append(f"Treks FALLÓ: {exc}")
 
     # ==================================================================
     # LUNA: datos crudos de LOLA + Diviner (las 2 únicas descargas reales)
@@ -209,7 +241,9 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         res_lola: dict[str, Any] = {}
 
         if usar_gds:
+            _aviso(aviso, "GDS Diviner (temperaturas): VARIOS MINUTOS...")
             res_div = termico.datos_diviner(cajas_g)
+            _aviso(aviso, "GDS LOLA (elevación): otros VARIOS MINUTOS...")
             res_lola = topografia.elevacion_lola(cajas_g)
 
         # --- sección térmica ------------------------------------------
@@ -237,6 +271,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             topo["elevacion_m"] = res_lola.get("error",
                                                "sin datos (usar_gds=False?)")
         try:
+            _aviso(aviso, "Catálogo STAC de DTM (USGS)...")
             topo["dtm_descargables"] = topografia.dtm_disponibles(
                 cuerpo, bbox_s, lat)
             resultado["metadatos"]["fuentes"].append("USGS STAC (DTM)")
@@ -266,6 +301,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                                "leer las teselas DEM de Mars Trek."),
         }
         try:
+            _aviso(aviso, "Catálogo STAC de DTM (USGS)...")
             topo["dtm_descargables"] = topografia.dtm_disponibles(
                 cuerpo, bbox_s, lat)
             resultado["metadatos"]["fuentes"].append("USGS STAC (DTM)")
@@ -282,15 +318,27 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             "capas_trek": utilidades.capas_por_keyword(capas_trek,
                                                        pc["temperatura"]),
         }
-        resultado["superficie"] = superficie.datos_superficie(None, capas_trek)
+        resultado["superficie"] = superficie.datos_superficie(
+            None, capas_trek, cuerpo="mars")
         resultado["iluminacion"] = iluminacion.datos_iluminacion(
-            capas_trek, None)
+            capas_trek, None, cuerpo="mars")
 
     # ==================================================================
-    # TIERRA: se delega todo al módulo de análogos
+    # TIERRA: se delega todo al módulo de análogos, pero con la MISMA
+    # envoltura (metadatos + registro) que el resto de los cuerpos.
     # ==================================================================
     else:  # earth
-        return analogos_tierra.datos_tierra(lat, lon, radio)
+        _aviso(aviso, "Análogos Tierra (catálogo CMR + GIBS + Copernicus)...")
+        resultado["analogos_tierra"] = analogos_tierra.datos_tierra(
+            lat, lon, radio)
+        resultado["metadatos"]["fuentes"].append(
+            "CMR/GIBS/Copernicus (análogos Tierra)")
+        try:
+            ruta_registro = guardar_en_registro(resultado)
+            resultado["metadatos"]["registro"] = str(ruta_registro)
+        except Exception as exc:
+            resultado["metadatos"]["registro"] = f"no se pudo guardar: {exc}"
+        return resultado
 
     # ------------------------------------------------------------------
     # Opcionales: URLs de teselas para el visor y análogos terrestres
