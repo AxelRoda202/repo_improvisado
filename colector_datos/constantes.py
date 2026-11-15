@@ -83,6 +83,53 @@ SITIOS = {
 }
 
 # ---------------------------------------------------------------------------
+# 2-bis. Catálogo de análogos terrestres (carga masiva a ±0.05°)
+# ---------------------------------------------------------------------------
+# Sitios de interés planetario en la TIERRA para poblar la DB de candidatos
+# (ver cargador_sitios.py / poblador_supabase.py). Todos se consultan con
+# radio 0.05 (±0.05°, la caja de comparación del proyecto). Coordenadas del
+# centro de cada analogía (aproximadas al punto clásico de estudio):
+CATALOGO_ANALOGOS_TIERRA = [
+    {"nombre": "Desierto de Atacama",
+     "lat": -24.08, "lon": -69.47,
+     "nota": "hiperárido, altura y UV extrema: análogo marciano clásico."},
+    {"nombre": "Death Valley",
+     "lat": 36.5, "lon": -117.1,
+     "nota": "extremos térmicos y aridez (llanuras marcianas calientes)."},
+    {"nombre": "Salar Grande",
+     "lat": -20.5, "lon": -69.8,
+     "nota": "salar nitrato-chileno: química hiperárida tipo regolito."},
+    {"nombre": "Salar de Pajonales",
+     "lat": -23.35, "lon": -67.6,
+     "nota": "morfología de colinas de sal: análogo de colinas de Marte."},
+    {"nombre": "Valles Secos de McMurdo (Taylor)",
+     "lat": -77.62, "lon": 163.05,
+     "nota": "desierto polar frío: análogo del subsuelo helado marciano."},
+    {"nombre": "Cráter Haughton (Devon)",
+     "lat": 75.4, "lon": -89.8,
+     "nota": "cráter de impacto en clima ártico: análogo lunar/marciano."},
+    {"nombre": "Tierras Altas de Islandia (Krafla)",
+     "lat": 65.71, "lon": -16.75,
+     "nota": "basaltos volcánicos fríos: análogo de llanuras de lava."},
+    {"nombre": "Desierto del Mojave",
+     "lat": 34.8, "lon": -116.5,
+     "nota": "arena/roca expuesta templada: pruebas de rovers NASA."},
+    {"nombre": "Desierto del Namib (Gobabeb)",
+     "lat": -23.56, "lon": 15.04,
+     "nota": "dunas antiguas y niebla costera: análogo de regs marcianos."},
+    {"nombre": "Desierto de Lut (Shahdad)",
+     "lat": 30.42, "lon": 57.77,
+     "nota": "yardangs y temperatura extrema: erosión eólica marciana."},
+    {"nombre": "Cuenca Qaidam",
+     "lat": 38.1, "lon": 92.4,
+     "nota": "meseta árida de altura con salares: análogo de bandejas."},
+    {"nombre": "El Tatio (altiplano)",
+     "lat": -22.33, "lon": -68.01,
+     "nota": "géiseres y sílice: análogo de sinter hidrotermal en Marte."},
+]
+
+
+# ---------------------------------------------------------------------------
 # 3. Colecciones USGS STAC por cuerpo y por latitud
 # ---------------------------------------------------------------------------
 # Cada clave es una lista de ids de colección del STAC de Astrogeology

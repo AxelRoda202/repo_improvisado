@@ -834,3 +834,116 @@ reanálisis POWER de ~50 km):
   antimeridiano (hoy se reporta cobertura < 1).
 - La rama `tierra-datos-crudos` NO está en `master` (igual que
   `dtm-rasterio`): falta revisión/push (NOTAS §11).
+
+## 23. Rama `supabase-candidatos` — carga masiva ±0.05° + DB de análogos en la nube
+
+**Fecha:** 15-nov-2026. Objetivo: alimentar la fase de evaluación con un
+catálogo de sitios candidatos a ±0.05° en el registro local y un buscador
+de similitud ponderada (K-NN) en Supabase.
+
+### 23.1 Qué se construyó (los 3 entregables + soporte)
+
+- `supabase/esquema_rpc.sql` — entregable 1, para el SQL Editor del panel:
+  tabla `sitios_candidatos` (claves del resumen unificado 1:1), tabla
+  `parametros_escalas` (rangos físicos de normalización, afinables sin
+  tocar la función), `calcular_similitud(perfil_ideal JSONB, datos_lugar
+  RECORD)` (distancia euclidiana inversa 0..1: NULL = "la fuente no dio
+  el dato" → ese parámetro se EXCLUYE y los pesos se renormalizan solos
+  al dividir por suma_pesos) y RPC
+  `buscar_analogos_ponderados(parametros JSONB, objetivo_espacial TEXT)`
+  (Top 1 extraterrestre fuera del cuerpo objetivo + Top 5 Tierra).
+  Idempotente (re-ejecutar no pisa los rangos afinados ni los datos).
+- `colector_datos/poblador_supabase.py` — entregable 2: fusiona
+  `data/registro_sitios.json` + `data/db/sitios_marte.db` por `sitio_id`,
+  salta filas todo-NULL (nunca devolverían similitud) y sube por lotes de
+  100 con `on_conflict='sitio_id'` (upsert resumible).
+  `lanzar_en_segundo_plano()` lo corre en un hilo daemon invocable desde
+  `ejemplo_uso.py --poblar_nube`. CLI: `simular` (mapping sin red),
+  `poblar`, `estado`.
+- `colector_datos/prueba_similitud_nube.py` — entregable 3: cliente del
+  RPC con payload de pesos (default 80 % pendiente / 20 % elevación),
+  `--perfil` JSON libre o `--perfil-desde 'clave@...±...'` (deriva el
+  perfil de un sitio real del registro con pesos equitativos).
+- `colector_datos/cargador_sitios.py` — la carga masiva al registro local
+  (NO a la nube: la nube se puebla desde el registro). Saltar lo ya
+  cargado, pool de hilos, tierra vía GLO-90 por defecto (`--glo30` para
+  fidelidad), bandera `--gds` para caracterizar polos lunares completos
+  (Diviner+LOLA vía GDS, minutos; con ella `--hilos 1`).
+- `constantes.CATALOGO_ANALOGOS_TIERRA` — 12 análogos terrestres clásicos
+  (Atacama, Death Valley, Salar Grande, Pajonales, McMurdo-Taylor,
+  Haughton, Krafla, Mojave, Namib-Gobabeb, Lut-Shahdad, Qaidam, El Tatio).
+
+### 23.2 Bugs encontrados y arreglados en esta rama
+
+- **Carrera del registro (REAL, mordió):** `guardar_en_registro` hace
+  leer-modificar-escribir del JSON entero; con el pool de 3 hilos de la
+  carga masiva, dos escritores se pisaron y el registro perdió 2 entradas
+  PREEXISTENTES (`moon@-23.4,157.8±0.05`, `mars@18.38,77.58±0.15`):
+  último escritor gana. Fix: `_LOCK_REGISTRO` (threading.Lock) en
+  `api.py` serializa SOLO la sección crítica; las consultas siguen en
+  paralelo. Ambas entradas restauradas (tibias, segundos).
+- **Vía DTM lunar anclada a `usar_gds`:** el pool lunar solo arrancaba
+  con `usar_gds=True`, así que `usar_gds=False` dejaba la Luna SIN
+  topografía (contradecía el docstring, que promete DTM en segundos).
+  Fix: el pool corre con `(usar_gds or usar_dtm)` y Diviner/LOLA solo con
+  `usar_gds`. Verificado: Smythii `via=dtm_kaguya` en 9.1 s con resumen
+  completo. Consecuencia para los polos: Kaguya no los cubre (huecos de
+  sombra, §9) y sin GDS quedan honestos pero sin métricas → bandera
+  `--gds` del cargador para completarlos (corrida aparte, minutos).
+- **Refactor del lock con error propio:** la primera versión del helper
+  `_guardar_en_registro_bajo_lock` no recibía `m` (metadatos) → el
+  registro devolvía "no se pudo guardar: name 'm' is not defined" y
+  NADA se escribía (19→17). Lección: tras un refactor, verificar con una
+  consulta real que el registro crece, no solo que el import pasa.
+- **Cuerpo en dos idiomas:** el registro usa los códigos internos
+  `earth/moon/mars` (de `utilidades.normalizar_cuerpo`) y la tabla de
+  Supabase usa `tierra/luna/marte` (check del SQL). Fix en el poblador:
+  mapa inverso `_CUERPO_ES` al subir (antes `nombre: null` y, peor, el
+  check habría rechazado TODAS las filas del registro).
+
+### 23.3 Mediciones de la carga (frío→tibio)
+
+- Catálogo completo: 19 sitios (tierra=12, luna=4, marte=3) en ~233 s.
+- Tierra vía GLO-90: tibio 4.6-11.9 s; frío 60-107 s (S2 cold es el techo).
+- Luna vía DTM (no polares): Smythii 9.1 s `dtm_kaguya`. Polares sin DTM:
+  fallback honesto sin números con `usar_gds=False`; con `--gds --hilos 1`
+  ≈ 1-2 min/sitio (PENDIENTE de correr: shackleton/malapert/peary con
+  Diviner+LOLA).
+- Marte: Jezero 2.3 s `dtm_mro`; Gale/Extranio sin DTM controlado → sin
+  métricas (comportamiento esperado, honesto).
+- Tibio total (todo cacheado): ~12 s para 19 sitios (no medido separado;
+  estimado de los tibios individuales).
+
+### 23.4 Decisiones Supabase (para el SQL del panel)
+
+- Normalización por RANGOS FÍSICOS en `parametros_escalas` (una fila por
+  parámetro; re-ejecutar el SQL NO pisa rangos afinados). La similitud es
+  `1 - sqrt(sum(w_i * d_i²) / sum(w_i))` con `d_i = (v_i - objetivo_i) /
+  rango_i`, recortada a [0,1].
+- `sitio_id` (la clave del registro, con `±` unicode) es UNIQUE y sirve
+  de `on_conflict` del upsert: repetir la carga ACTUALIZA (misma pauta
+  que el registro local).
+- `fecha_consulta` se guarda como TEXT tal cual vino (ISO del registro):
+  no se inventa un timestamptz parseado.
+- `extra JSONB` recoge lo que no es columna (mediciones THEMIS, fuentes).
+- El RPC devuelve JSONB único (`extraterrestre_top1` + `tierra_top5` +
+  diagnóstico): una sola ida y vuelta para el cliente de prueba.
+- Credenciales: `SUPABASE_KEY` = **service_role** (sk_...) SOLO en
+  `.env` local; el `anon` key no puede escribir sin RLS abierta.
+
+### 23.5 Estado de la rama y pendiente
+
+- Verificado sin red: `poblador simular` (19 filas mapeadas, tierra=12,
+  luna=4, marte=3, nombres resueltos, cuerpo en español);
+  `prueba_similitud_nube` → error claro sin credenciales;
+  `ejemplo_uso --rapido --poblar_nube` → prechequeo de credenciales y
+  mensaje determinista (el hilo daemon moría con el proceso sin imprimir).
+- `requirements.txt`: `supabase` y `python-dotenv` pasan a obligatorios.
+- Pendiente del usuario: ejecutar `supabase/esquema_rpc.sql` en el SQL
+  Editor, rellenar `.env` (URL + service_role) y correr
+  `python -m colector_datos.poblador_supabase poblar` +
+  `python -m colector_datos.prueba_similitud_nube`.
+- Pendiente opcional: polos lunares con `--solo luna --gds --hilos 1`
+  (Diviner frío ~1-2 min/sitio; daría térmico + LOLA a shackleton,
+  malapert y peary).
+- Push: 403 con la credencial de este dispositivo (§11); Axel empuja.

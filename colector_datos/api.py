@@ -47,7 +47,9 @@ iluminación local (0 llamadas). Presupuesto terrestre frío: ~1 tile de
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import (
@@ -129,6 +131,16 @@ def _aviso(aviso, mensaje: str) -> None:
             pass  # un aviso nunca debe romper la consulta
 
 
+# Lock del registro: `guardar_en_registro` hace leer-modificar-escribir del
+# JSON entero y puede llamarse desde VARIOS hilos a la vez (el pool de
+# api.py, o cargadores que lanzan consultas en paralelo). Sin lock, dos
+# escrituras simultáneas se pisan (último escritor gana) y se PIERDEN
+# entradas ya guardadas — pasó de verdad en la carga masiva de sitios
+# (rama `supabase-candidatos`): dos entradas del registro desaparecieron.
+# El lock serializa la sección crítica; las consultas siguen en paralelo.
+_LOCK_REGISTRO = threading.Lock()
+
+
 def guardar_en_registro(resultado: dict[str, Any],
                         ruta: str | None = None) -> Any:
     """Guarda la consulta en el registro `colector_datos/data/registro_sitios.json`.
@@ -148,15 +160,24 @@ def guardar_en_registro(resultado: dict[str, Any],
     Devuelve la ruta del registro. Nunca lanza error: si no se puede escribir
     (permisos, disco), devuelve el detalle del fallo y la consulta sigue.
     """
-    import json
-    import os
-    import shutil
-    from pathlib import Path
-
     ruta = Path(ruta or constantes.RUTA_REGISTRO)
     m = resultado.get("metadatos", {})
     clave = (f"{m.get('cuerpo')}@{m.get('lat')},{m.get('lon')}"
              f"±{m.get('radio_grados')}")
+
+    # Sección crítica (leer-modificar-escribir del JSON entero): el lock
+    # evita que dos escritores concurrentes se pisen y pierdan entradas
+    # (pasó de verdad en la carga masiva: ver _LOCK_REGISTRO arriba).
+    with _LOCK_REGISTRO:
+        return _guardar_en_registro_bajo_lock(resultado, ruta, clave, m)
+
+
+def _guardar_en_registro_bajo_lock(resultado: dict[str, Any], ruta, clave: str,
+                                   m: dict[str, Any]) -> Any:
+    """Cuerpo de guardar_en_registro (con _LOCK_REGISTRO ya tomado)."""
+    import json
+    import os
+    import shutil
 
     # Copia ligera: mismo dict, sin los puntos crudos (ya están resumidos).
     copia = json.loads(json.dumps(resultado, default=str))  # deep-copy barato
@@ -242,6 +263,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                         usar_dtm: bool = True,
                         con_teselas: bool = False,
                         incluir_tierra: bool = False,
+                        resolucion_topografia: str = "30m",
                         aviso=None) -> dict[str, Any]:
     """Devuelve el diccionario completo de parámetros para UN sitio.
 
@@ -313,10 +335,15 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     # en milisegundos y el techo lo pone el catálogo Treks (~8 s).
     # ------------------------------------------------------------------
     futuros: dict[str, Any] = {}
-    if cuerpo == "moon" and usar_gds:
+    if cuerpo == "moon" and (usar_gds or usar_dtm):
+        # El pool corre si hay GDS (Diviner/LOLA) O si hay DTM: la
+        # topografía Kaguya NO debe quedar anclada a usar_gds — el
+        # docstring promete usar_gds=False + usar_dtm=True como la vía
+        # "rápida" (DTM en segundos, sin tocar el GDS lento).
         from concurrent.futures import ThreadPoolExecutor
 
-        tareas = "catálogo Treks + GDS Diviner + catálogo STAC"
+        tareas = ("catálogo Treks + GDS Diviner + catálogo STAC"
+                  if usar_gds else "catálogo Treks + catálogo STAC")
         tareas += " + DTM Kaguya" if usar_dtm else " + GDS LOLA"
         _aviso(aviso, f"En paralelo: {tareas}... "
                "(1ª vez: minutos; con caché: segs)")
@@ -324,9 +351,10 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         futuros = {
             "_pool": pool,
             "capas": pool.submit(_capas_trek, cuerpo, projtype),
-            "diviner": pool.submit(termico.datos_diviner, cajas_g),
             "dtm_stac": pool.submit(_dtm_de_stac, cuerpo, bbox_s, lat),
         }
+        if usar_gds:
+            futuros["diviner"] = pool.submit(termico.datos_diviner, cajas_g)
         if usar_dtm:
             # Experimento A integrado: el análisis DTM se ENCADENA al futuro
             # del STAC (arranca cuando la búsqueda termina y reutiliza sus
@@ -335,7 +363,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             futuros["dtm"] = pool.submit(
                 _dtm_encadenado, cuerpo, lat, lon, radio,
                 futuros["dtm_stac"], aviso)
-        else:
+        elif usar_gds:
             futuros["lola"] = pool.submit(topografia.elevacion_lola, cajas_g)
     elif cuerpo not in ("earth", "mars"):
         # Otros cuerpos (ninguno por ahora): el catálogo se baja en serie.
@@ -355,7 +383,8 @@ def obtener_datos_sitio(cuerpo: str = "luna",
             # Recogemos los resultados del pool paralelo. Las funciones
             # internas ya capturan sus propios errores y devuelven dicts de
             # error, así que .result() no debe lanzar nada inesperado.
-            res_div = futuros["diviner"].result()
+            res_div = (futuros["diviner"].result()
+                       if "diviner" in futuros else {})
             capas_trek, fuente_trek = futuros["capas"].result()
             resultado["metadatos"]["fuentes"].append(fuente_trek)
             dtm_precargado, fuente_stac = futuros["dtm_stac"].result()
@@ -437,7 +466,7 @@ def obtener_datos_sitio(cuerpo: str = "luna",
                        "fallback a GDS LOLA (VARIOS MINUTOS)...")
                 resultado["metadatos"]["fuentes"].append(
                     f"DTM Kaguya DESCARTADO ({motivo})")
-            if futuros:
+            if futuros and usar_gds:
                 if usar_dtm:
                     res_lola = futuros["_pool"].submit(
                         topografia.elevacion_lola, cajas_g).result()
@@ -609,12 +638,13 @@ def obtener_datos_sitio(cuerpo: str = "luna",
     else:  # earth
         from concurrent.futures import ThreadPoolExecutor
 
-        _aviso(aviso, "En paralelo: DTM GLO-30 + POWER (térmico) + "
-               "Sentinel-2 (superficie)... (tibio: segundos)")
+        _aviso(aviso, f"En paralelo: DEM GLO-{resolucion_topografia[:-1]} + "
+               "POWER (térmico) + Sentinel-2 (superficie)... (tibio: segundos)")
         pool = ThreadPoolExecutor(3)
         futuros_t = {
             "topo": pool.submit(topografia_tierra.analizar_sitio,
-                                lat, lon, radio),
+                                lat, lon, radio, "descargar", None,
+                                resolucion_topografia),
             "term": pool.submit(termico_tierra.datos_termico_tierra,
                                 lat, lon),
             "sup": pool.submit(superficie_tierra.datos_superficie_tierra,
@@ -639,7 +669,11 @@ def obtener_datos_sitio(cuerpo: str = "luna",
         else:
             topo: dict[str, Any] = {
                 "fuente": "Copernicus DEM GLO-30 (AWS público) vía rasterio",
-                "via": "glo30",
+                # 'via' refleja la resolución pedida: 'glo30' (default,
+                # ~30 m/px) o 'glo90' (criba rápida, ~90 m/px). Así el
+                # resumen del registro es trazable entre corridas.
+                "via": ("glo90" if res_topo.get("resolucion") == "90m"
+                        else "glo30"),
                 "elevacion_m": res_topo["elevacion"],
                 "pendiente": res_topo["pendiente"],
                 "rugosidad": res_topo["rugosidad"],
