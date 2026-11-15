@@ -70,7 +70,8 @@ def search_granules(
                 "title": g.get("title"),
                 "time_start": g.get("time_start"),
                 "time_end": g.get("time_end"),
-                "size_mb": round(int(g.get("granule_size", 0)) / 1e6, 2) if g.get("granule_size") else None,
+                "size_mb": round(float(g.get("granule_size") or 0) / 1e6, 2)
+                if g.get("granule_size") else None,
                 "download": links[:1],
             }
         )
