@@ -973,3 +973,90 @@ Smoke real: `--lote 2 --hilos 2` -> gazetteer indexado, 3 sitios
 enriquecidos (1 listo, 5 sin_dtm), y subidas a la nube `+20 -> +21`
 CONFIRMA que la service_role key del usuario ya escribe (el 42501 quedó
 resuelto cambiando publishable por secret).
+
+## 24. Luna con la funcionalidad de marte + APIs v2 + guardián de Supabase
+
+**Pedido:** "implementar la funcionalidad que tiene marte con la db
+también a la luna" (gazetteer -> DB local -> nube), APIs propias por
+cuerpo (luna/marte top-1 individual; tierra flexible con similitudes por
+categoría), investigar el límite de Supabase y cargar en fondo
+respetándolo con sectorización por prioridad.
+
+### 24.1 Límite de Supabase (investigado, 15-nov-2026)
+
+- Plan Free: **500 MB de base de datos por proyecto** (+ 1 GB file
+  storage, 2 proyectos). Al superar 500 MB: avisos y, tras gracia,
+  posibles restricciones (read-only / pausa / errores 402).
+- Tamaño REAL de nuestro catálogo: ~0.3-0.5 KB por fila de
+  `sitios_candidatos` -> 1.133 marcianos + ~2.090 lunares + 12 terrestres
+  ≈ **1-1.5 MB**. No hay riesgo con filas de resumen; el guardián existe
+  para el día que se suban series u otras tablas.
+- **Guardián implementado**: RPC `uso_bd()` (security definer; bytes de
+  base, bytes de tabla y nº filas). `poblar()` lo consulta al inicio y
+  antes de CADA lote; límite de trabajo 450 MB (env
+  `NSAC_SUPABASE_LIMITE_MB`); al llegar, corta LIMPIO (lo subido queda;
+  repetir continúa). Degradación honesta: si el RPC no existe (falta
+  rpc_v2.sql), avisa y sigue sin guardián.
+- **Sectorización por prioridad**: `filas_unificadas()` ordena
+  tierra -> luna -> marte (SECTOR_PRIORIDAD): si el guardián corta, lo
+  valioso ya está dentro. "Adaptar el rango de tiempo de la tierra" no
+  aplica hoy (las filas de tierra son resúmenes estáticos, no series);
+  si un día hay series, el mecanismo límite+prioridad ya está en pie.
+
+### 24.2 `db_sitios_luna.py` (paridad con `db_sitios_marte`)
+
+- Gazetteer: `Target=16_Moon` (¡NO 10_Moon! sondeado: la página del
+  buscador lista 16_Moon), PageSize=500 trae la página entera: **24 MB,
+  9.202 lugares parseados en 3.9 s** -> **2.081 insertados** tras excluir
+  los 7.114 'Satellite Feature' (epónimos de cráteres satélite "Walther
+  A": denso y poco útil). En la Luna TODOS los cráteres con nombre
+  entran (sin filtro de 40 km: el Kaguya DTM de ~10-30 m/px los
+  resuelve; el total queda comparable a Marte).
+- Enriquecimiento vía `topografia.dtm_disponibles('moon',...)` +
+  `topografia_dtm.analizar_sitio(cuerpo='moon', modo_tile='remoto')`.
+  **Política RELAJADA (>=50% píxeles válidos y >=50% cobertura, con nota
+  honesta), la misma de la DB marciana** — NO la estricta de api.py
+  (>=90% cobertura): las cajas del gazetteer (0.05-0.5°) no siempre caben
+  enteras en los tiles Kaguya (Lansberg: 67% cobertura con 94% de
+  píxeles válidos — los 4 primeros sitios salieron sin_dtm POR ERROR y
+  se reencolaron a mano tras corregir la política; lección: la política
+  de api.py es para cajas de ±0.05°).
+- Ritmo medido: ~5 s/sitio con 3 hilos -> **2.067 pendientes ≈ 1 h**.
+  Los sin_dtm de polos (huecos de sombra) y de cajas sin tile quedan
+  honestos fuera.
+- Esquema gemelo al marciano (sin themis_*/mediciones) -> los
+  consumidores (`sitios_disponibles`, poblador) leen las dos DBs con el
+  MISMO código (`_filas_de_db_gazetteer(modulo, cuerpo)`).
+
+### 24.3 APIs v2 (`supabase/rpc_v2.sql`, a pegar en el panel DESPUÉS del esquema base)
+
+- `similitud_ponderada(perfil JSONB, datos JSONB)`: la fórmula euclidiana
+  inversa GENÉRICA (recorre el perfil con jsonb_each; nada de bloques por
+  columna). NULL en la fila = parámetro excluido, pesos renormalizados
+  (regla de oro). Guardia anti-NaN.
+- `similitudes_por_categoria(perfil, datos)`: similitud INDEPENDIENTE por
+  categoria (topografia/termico/superficie/iluminacion, cada una
+  renormaliza SUS pesos) + 'global'. Con una fila sin datos de una
+  categoría -> NULL (no se inventa).
+- `buscar_analogo_cuerpo(parametros, cuerpo, topn=1)`: API PROPIA de cada
+  cuerpo (luna/marte/tierra): Top N con desglose por categorías.
+- `buscar_analogos_v2(parametros)`: UNA llamada -> luna_top1 + marte_top1
+  (individuales, cada uno por su API interna) + tierra_top5 (flexible,
+  con categorías) + conteos 'vistos'.
+- `uso_bd()`: el guardián de §24.1.
+- Cliente: `prueba_similitud_nube` ahora llama v2 por defecto (y
+  `--cuerpo luna --topn 3` para la API de un cuerpo); imprime el desglose
+  global/topografia/termico/superficie/iluminacion por fila.
+
+### 24.4 Estado y pendiente
+
+- Hecho y verificado localmente: DB lunar indexada (2.081, 2.067
+  'pendiente' tras el smoke), 10+ sitios lunares 'listo' con DTM real,
+  poblador fusiona las 3 fuentes con prioridad (simular: tierra=12,
+  luna=17, marte=5).
+- **Pendiente del usuario**: pegar `supabase/rpc_v2.sql` en el SQL Editor
+  (el cliente y el guardián lo necesitan) y dejar corriendo
+  `python -m colector_datos.carga_fondo --saltear_tierra --saltear_marte`
+  para la fase lunar (~1 h) — o el comando completo para ambas.
+- Pendiente opcional: polos lunares con térmico real (Diviner vía GDS,
+  `cargador_sitios --solo luna --gds --hilos 1`).

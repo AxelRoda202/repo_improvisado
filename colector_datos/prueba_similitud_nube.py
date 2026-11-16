@@ -7,12 +7,17 @@ QUÉ HACE:
   2) Construye un perfil ideal con PESOS (por defecto 80 % pendiente,
      20 % elevación) — opcionalmente extraído de un sitio REAL del registro
      local con `--perfil-desde 'marte@18.38,77.58±0.15'`.
-  3) Llama al RPC `buscar_analogos_ponderados` (definido en
-     `supabase/esquema_rpc.sql`, a ejecutar en el panel) y imprime
-     estructurados el ganador espacial y los 5 análogos terrestres.
+  3) POR DEFECTO llama al RPC `buscar_analogos_v2` (definido en
+     `supabase/rpc_v2.sql`, a ejecutar en el panel DESPUÉS del esquema
+     base): Top 1 de LUNA, Top 1 de MARTE (cada cuerpo con su API propia)
+     y Top 5 de la TIERRA con similitud INDEPENDIENTE por categoría de
+     datos (topografia/termico/superficie/iluminacion) + la global.
+     Con `--cuerpo luna|marte|tierra` usa la API del cuerpo solo
+     (`buscar_analogo_cuerpo`) con `--topn` resultados.
 
 Uso (desde la raíz):
     python -m colector_datos.prueba_similitud_nube
+    python -m colector_datos.prueba_similitud_nube --cuerpo luna --topn 3
     python -m colector_datos.prueba_similitud_nube --perfil-desde \
         "earth@-24.08,-69.47±0.05"
     python -m colector_datos.prueba_similitud_nube --perfil '{"fraccion_diurna": {"valor": 0.9, "peso": 1.0}}'
@@ -71,9 +76,16 @@ def main() -> None:
     ap.add_argument("--perfil-desde", default=None, metavar="CLAVE",
                     help="deriva el perfil de un sitio real del registro "
                          "(p.ej. 'marte@18.38,77.58±0.15')")
-    ap.add_argument("--objetivo", default="marte",
+    ap.add_argument("--cuerpo", default=None,
                     choices=("tierra", "luna", "marte"),
-                    help="cuerpo del sitio objetivo (default: marte)")
+                    help="API PROPIA de un cuerpo: Top N SOLO de ese cuerpo "
+                         "(RPC buscar_analogo_cuerpo). Sin esta opción se "
+                         "usa la búsqueda completa v2: luna_top1 + "
+                         "marte_top1 + tierra_top5 con desglose por "
+                         "categorías")
+    ap.add_argument("--topn", type=int, default=1,
+                    help="cuántos resultados por cuerpo (con --cuerpo; "
+                         "default 1)")
     args = ap.parse_args()
 
     if args.perfil_desde:
@@ -97,43 +109,72 @@ def main() -> None:
                          "SUPABASE_URL y SUPABASE_KEY (service_role), y "
                          "ejecuta supabase/esquema_rpc.sql en el panel.\n")
 
-    print(f"\nRPC buscar_analogos_ponderados (objetivo={args.objetivo})")
     print("perfil: " + json.dumps(perfil, ensure_ascii=False))
 
-    try:
-        r = cliente.rpc("buscar_analogos_ponderados", {
+    if args.cuerpo:
+        # --- API propia de un cuerpo: Top N solo de ese cuerpo ------------
+        rpc, params = "buscar_analogo_cuerpo", {
             "parametros": {"perfil": perfil},
-            "objetivo_espacial": args.objetivo,
-        }).execute()
+            "cuerpo": args.cuerpo, "topn": args.topn,
+        }
+        titulo = f"Top {args.topn} de {args.cuerpo}"
+    else:
+        # --- búsqueda completa v2 (luna + marte + tierra en una llamada) --
+        rpc, params = "buscar_analogos_v2", {"parametros": {"perfil": perfil}}
+        titulo = "Búsqueda completa v2 (luna_top1 + marte_top1 + tierra_top5)"
+    print(f"\nRPC {rpc} — {titulo}")
+
+    try:
+        r = cliente.rpc(rpc, params).execute()
     except Exception as exc:
         texto = str(exc)
         raise SystemExit(
             f"\nX el RPC falló: {texto[:300]}\n"
             "  → si el error menciona 'schema cache' o PGRST202, recarga la\n"
-            "    API (Settings -> API -> Reload) tras ejecutar\n"
-            "    supabase/esquema_rpc.sql, y revisa que la tabla tenga filas\n"
-            "    (puebla con: python -m colector_datos.poblador_supabase poblar)\n")
+            "    API (Settings -> API -> Reload) tras ejecutar en el panel\n"
+            "    supabase/esquema_rpc.sql Y supabase/rpc_v2.sql, y revisa\n"
+            "    que la tabla tenga filas (puebla con:\n"
+            "    python -m colector_datos.poblador_supabase poblar)\n")
 
     d = r.data if isinstance(r.data, dict) else json.loads(r.data or "{}")
+
+    CATEGORIAS = ("global", "topografia", "termico", "superficie",
+                  "iluminacion")
 
     def _fila(f: dict) -> str:
         if not f:
             return "— (sin candidato: ¿tabla poblada? ¿similitud NULL?)"
-        return (f"{f.get('nombre') or f.get('sitio_id')} "
+        base = (f"{f.get('nombre') or f.get('sitio_id')} "
                 f"[{f.get('cuerpo')}] ({f.get('lat')}, {f.get('lon')}) "
-                f"similitud={f.get('similitud')}")
+                f"global={f.get('similitud')}")
+        s = f.get("similitudes")
+        if isinstance(s, dict):
+            partes = [f"{c}={_fmt(s.get(c))}" for c in CATEGORIAS[1:]]
+            base += " | " + ", ".join(partes)
+        return base
 
-    print("\n=== Top 1 extraterrestre ===")
-    print("  " + _fila(d.get("extraterrestre_top1") or {}))
-    print("\n=== Top 5 análogos terrestres ===")
-    for f in d.get("tierra_top5") or []:
-        print("  " + _fila(f))
-    print(f"\n(vistos: {d.get('candidatos_espaciales_vistos')} espaciales, "
-          f"{d.get('candidatos_tierra_vistos')} terrestres)")
-    print("\nEl 'similitud' es la distancia euclidiana inversa normalizada "
-          "del perfil (1 = idéntico; los parámetros NULL de cada fila se "
-          "excluyen y los pesos se renormalizan — regla de oro: no se "
-          "inventan números).")
+    def _fmt(v):
+        return "—" if v is None else (f"{v:.3f}" if isinstance(v, (int, float))
+                                      else str(v)[:6])
+
+    if args.cuerpo:
+        print(f"\n=== Top {args.topn} de {args.cuerpo} "
+              f"(vistos: {d.get('vistos')}) ===")
+        for f in d.get("resultados") or []:
+            print("  " + _fila(f))
+    else:
+        print("\n=== Luna: Top 1 ===")
+        print("  " + _fila(d.get("luna_top1") or {}))
+        print("\n=== Marte: Top 1 ===")
+        print("  " + _fila(d.get("marte_top1") or {}))
+        print("\n=== Tierra: Top 5 (con similitud por categoría) ===")
+        for f in d.get("tierra_top5") or []:
+            print("  " + _fila(f))
+        print(f"\n(vistos: {json.dumps(d.get('vistos') or {})})")
+    print("\n'global' = la similitud con TODOS los pesos del perfil; cada "
+          "categoría (topografia/termico/superficie/iluminacion) renormaliza "
+          "SUS pesos entre los parámetros que la fila tiene. NULL = la fila "
+          "no tiene datos de esa categoría (no se inventan números).")
 
 
 if __name__ == "__main__":

@@ -46,9 +46,20 @@ from pathlib import Path
 from typing import Any
 
 from . import constantes
+from . import db_sitios_luna
+from . import db_sitios_marte
 
 RUTA_REGISTRO = constantes.RUTA_REGISTRO
 RUTA_ENV = Path(__file__).resolve().parent.parent / ".env"
+
+# Límite de almacenamiento del poblador (plan Free de Supabase: 500 MB por
+# proyecto; se trabaja con margen). Sobreescible con NSAC_SUPABASE_LIMITE_MB.
+# Antes de CADA lote se consulta `uso_bd()` (RPC de supabase/rpc_v2.sql) y,
+# si la tabla está al límite, la subida SE DETIENE (nunca se pisa el plan).
+# El orden de subida es por SECTOR DE PRIORIDAD: tierra -> luna -> marte,
+# así lo valioso ya está en la nube cuando el guardián corta.
+LIMITE_MB_DEFECTO = 450.0
+SECTOR_PRIORIDAD = ("tierra", "luna", "marte")
 
 # Columnas de la tabla Supabase que salen del 'resumen' unificado
 # (las claves coinciden 1:1: el SQL define la tabla A PARTIR de ellas).
@@ -192,16 +203,29 @@ def filas_de_db_marte() -> list[dict[str, Any]]:
     Reutiliza `sitios_disponibles(solo_listos=True)`, que ya devuelve el
     resumen con EXACTAMENTE las claves del registro + metadatos de la DB.
     """
-    from . import db_sitios_marte
+    return _filas_de_db_gazetteer(db_sitios_marte, "marte")
 
+
+def filas_de_db_luna() -> list[dict[str, Any]]:
+    """Sitios 'listo' de `db_sitios_luna` -> filas (cuerpo='luna').
+
+    MISMA estructura que la marciana (mismo esquema de DB, mismo formato
+    de resumen; `via_topografia='dtm_kaguya'`): la paridad luna/marte
+    viene de que las dos DBs de gazetteer son gemelas.
+    """
+    return _filas_de_db_gazetteer(db_sitios_luna, "luna")
+
+
+def _filas_de_db_gazetteer(modulo, cuerpo: str) -> list[dict[str, Any]]:
+    """Común de las dos DBs de gazetteer (marte/luna): mismas claves."""
     filas: list[dict[str, Any]] = []
-    for s in db_sitios_marte.sitios_disponibles(solo_listos=True):
+    for s in modulo.sitios_disponibles(solo_listos=True):
         resumen = s.get("resumen") or {}
         if not any(resumen.get(k) is not None for k in CLAVES_RESUMEN):
             continue
         fila: dict[str, Any] = {
             "sitio_id": s["sitio_id"],
-            "cuerpo": "marte",
+            "cuerpo": cuerpo,
             "nombre": s.get("nombre"),
             "tipo": s.get("tipo"),
             "lat": s["lat"], "lon": s["lon"],
@@ -219,17 +243,53 @@ def filas_de_db_marte() -> list[dict[str, Any]]:
 
 
 def filas_unificadas() -> list[dict[str, Any]]:
-    """Fusión por sitio_id: registro (resumen completo) + DB marciana
-    (metadatos/mediciones); la DB completa claves que el registro no tenga."""
+    """Fusión por sitio_id: registro (resumen completo) + las DOS DBs de
+    gazetteer (marte y luna: metadatos/mediciones); la DB completa claves
+    que el registro no tenga. La lista sale ORDENADA POR SECTOR DE
+    PRIORIDAD (tierra -> luna -> marte): si el guardián de almacenamiento
+    corta la subida, lo primero valioso ya está en la nube."""
     fusion: dict[str, dict[str, Any]] = {}
     for f in filas_de_db_marte():
         fusion[f["sitio_id"]] = f
+    for f in filas_de_db_luna():
+        fusion.setdefault(f["sitio_id"], f)
     for f in filas_de_registro():
         base = fusion.get(f["sitio_id"], {})
         base.update({k: v for k, v in f.items()
                      if v is not None or k not in base})
         fusion[f["sitio_id"]] = base
-    return list(fusion.values())
+
+    prioridad = {c: i for i, c in enumerate(SECTOR_PRIORIDAD)}
+    return sorted(fusion.values(),
+                  key=lambda f: prioridad.get(f["cuerpo"], 99))
+
+
+def _limite_bytes() -> float:
+    """Límite de trabajo del poblador en bytes (env NSAC_SUPABASE_LIMITE_MB,
+    default 450 MB: margen sobre los 500 MB del plan Free)."""
+    try:
+        return float(os.environ.get("NSAC_SUPABASE_LIMITE_MB",
+                                    LIMITE_MB_DEFECTO)) * 1e6
+    except ValueError:
+        return LIMITE_MB_DEFECTO * 1e6
+
+
+def uso_nube(cliente=None) -> dict[str, Any]:
+    """Consume el RPC `uso_bd()` (supabase/rpc_v2.sql): tamaño de la base,
+    de la tabla y nº de filas. Devuelve {'error': ...} si el RPC no existe
+    todavía (esquema base sin actualizar): el guardián degrada, no rompe."""
+    try:
+        cliente = cliente or _cliente()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    try:
+        r = cliente.rpc("uso_bd", {}).execute()
+        d = r.data
+        if isinstance(d, list) and d:
+            d = d[0]
+        return d if isinstance(d, dict) else {"error": "respuesta rara"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +328,42 @@ def poblar(lote: int = TAMANO_LOTE, simular: bool = False,
     except RuntimeError as exc:
         return {"subidos": 0, "error": str(exc)}
 
+    # --- guardián de almacenamiento (plan Free: 500 MB) -------------------
+    limite_bytes = _limite_bytes()
+    uso = uso_nube(cliente)
+    if uso:
+        if uso.get("error"):
+            _aviso(f"[espacio] uso_bd no disponible ({uso['error'][:80]}): "
+                   "la subida sigue SIN guardián (ejecuta rpc_v2.sql)")
+        else:
+            mb = uso["bytes_base_datos"] / 1e6
+            _aviso(f"[espacio] base de datos: {mb:.1f} MB "
+                   f"(tabla sitios_candidatos: "
+                   f"{uso['bytes_tabla'] / 1e6:.2f} MB, "
+                   f"{uso['filas']} filas; límite de trabajo "
+                   f"{limite_bytes / 1e6:.0f} MB)")
+            if uso["bytes_base_datos"] >= limite_bytes:
+                return {"subidos": 0, "detenido": "espacio",
+                        "detalle": f"la base ocupa {mb:.0f} MB >= límite "
+                                   f"{limite_bytes / 1e6:.0f} MB: no se "
+                                   "sube nada más (plan Free 500 MB). "
+                                   "Prioridad ya aplicada: tierra -> "
+                                   "luna -> marte."}
+
     subidos, errores = 0, []
     for i in range(0, len(filas), lote):
         bloque = filas[i:i + lote]
+        if uso and not uso.get("error"):
+            # Re-chequeo antes de CADA lote: si la base llega al límite en
+            # medio de la carga, se corta limpio (los lotes ya subidos
+            # quedan; repetir la llamada continúa).
+            uso2 = uso_nube(cliente)
+            if uso2 and not uso2.get("error") \
+                    and uso2["bytes_base_datos"] >= limite_bytes:
+                errores.append(f"lote {i // lote + 1}: DETENIDO por "
+                               f"límite de espacio "
+                               f"({uso2['bytes_base_datos'] / 1e6:.0f} MB)")
+                break
         try:
             cliente.table("sitios_candidatos").upsert(
                 bloque, on_conflict="sitio_id").execute()

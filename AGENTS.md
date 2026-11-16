@@ -19,7 +19,8 @@ python -m colector_datos.ejemplo_uso --rapido    # fumo del colector (sin GDS, s
 python -m colector_datos.prueba_funcion --sitio malapert   # informe completo (GDS: minutos)
 python -m colector_datos.prueba_dtm --lat 41.2 --lon -23.7 --radio 0.05  # A/B DTM vs LOLA
 python -m colector_datos.db_sitios_marte estado  # DB de sitios marcianos
-python -m colector_datos.carga_fondo             # TODO tierra+marte -> nube (reanudable, 1-2 h)
+python -m colector_datos.db_sitios_luna estado   # DB de sitios lunares (paridad)
+python -m colector_datos.carga_fondo             # TODO tierra+luna+marte -> nube (reanudable)
 ```
 
 Los módulos se ejecutan como `python -m colector_datos.<modulo>` **desde la
