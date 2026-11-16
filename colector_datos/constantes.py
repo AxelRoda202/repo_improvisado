@@ -126,6 +126,54 @@ CATALOGO_ANALOGOS_TIERRA = [
     {"nombre": "El Tatio (altiplano)",
      "lat": -22.33, "lon": -68.01,
      "nota": "géiseres y sílice: análogo de sinter hidrotermal en Marte."},
+    # --- Ronda 2 (15-nov-2026): análogos clásicos de la literatura ---------
+    {"nombre": "Salar de Uyuni",
+     "lat": -20.13, "lon": -67.49,
+     "nota": "el salar más grande: calibración de altímetros (ICESat) y "
+             "superficie de sal plana tipo Playas marcianas."},
+    {"nombre": "Dallol (Etiopía)",
+     "lat": 14.24, "lon": 40.30,
+     "nota": "hidrotermal ácido hiperactivo: análogo de chimeneas y "
+             "depósitos de sulfatos en Marte."},
+    {"nombre": "Río Tinto",
+     "lat": 37.70, "lon": -6.55,
+     "nota": "río ácido con hierro (bioastro de referencia): análogo de "
+             "hematita y sulfatos marcianos (Meridiani)."},
+    {"nombre": "Wadi Rum",
+     "lat": 29.58, "lon": 35.42,
+     "nota": "valle granítico-arenoso árido: escenario de pruebas y "
+             "análogo de paisajes de superficie marciana."},
+    {"nombre": "Lago Lonar (India)",
+     "lat": 19.98, "lon": 76.51,
+     "nota": "cráter de impacto en basalto: análogo de cráteres en "
+             "llanuras volcánicas (luna/marte)."},
+    {"nombre": "Meteor Crater (Barringer)",
+     "lat": 35.03, "lon": -111.02,
+     "nota": "cráter de impacto conservado: análogo de morfología de "
+             "bordes y eyecta (luna/marte)."},
+    {"nombre": "Kilauea (Hawái)",
+     "lat": 19.41, "lon": -155.29,
+     "nota": "volcanismo activo: análogo de tubos de lava y flujos "
+             "(Olympus/Elysium)."},
+    {"nombre": "Shark Bay (Australia)",
+     "lat": -25.66, "lon": 113.67,
+     "nota": "estromatolitos vivos: análogo de biofirmas en cuencas "
+             "costeras antiguas."},
+    {"nombre": "Pilbara (Australia)",
+     "lat": -21.20, "lon": 116.60,
+     "nota": "estromatolitos de 3.500 Ma y cherts: el registro más viejo "
+             "de vida, análogo de terrenos Noachianos."},
+    {"nombre": "Svalbard (Bockfjorden)",
+     "lat": 78.20, "lon": 15.60,
+     "nota": "volcanismo ártico y glaciares: campo de entrenamiento AMASE "
+             "para instrumentos de rovers."},
+    {"nombre": "Makgadikgadi (Botsuana)",
+     "lat": -20.40, "lon": 24.70,
+     "nota": "lago salado seco gigante: análogo de paleolagos marcianos."},
+    {"nombre": "El Pinacate",
+     "lat": 31.77, "lon": -113.49,
+     "nota": "maares volcánicos y dunas: análogo de cráteres volcánicos y "
+             "regolito arenoso."},
 ]
 
 
