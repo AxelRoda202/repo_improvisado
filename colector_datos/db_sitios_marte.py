@@ -675,6 +675,15 @@ def estado_db() -> dict[str, Any]:
 
 def main() -> None:
     import argparse
+    import sys
+
+    # Consola Windows: nombres con diacríticos rompen cp1252 (ver
+    # carga_fondo.py): reconfigurar stdout con replace, sin entorno.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
     def _aviso(msg: str) -> None:
         print(msg, flush=True)

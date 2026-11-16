@@ -440,6 +440,16 @@ def estado_db() -> dict[str, Any]:
 
 def main() -> None:
     import argparse
+    import sys
+
+    # Consola Windows: los nombres del Gazetteer llevan diacríticos
+    # (p.ej. 'Běla'); sin esto, cp1252 rompe el print. (Equivalente a
+    # PYTHONIOENCODING=utf-8 pero sin depender del entorno.)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
     def _aviso(msg: str) -> None:
         print(msg, flush=True)

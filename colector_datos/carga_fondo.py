@@ -94,15 +94,19 @@ def fase_gazetteer() -> dict[str, Any]:
 
 
 def fase_marte(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
-               sube_a_nube: bool = True) -> dict[str, Any]:
+               sube_a_nube: bool = True,
+               muestra: int | None = None) -> dict[str, Any]:
     """Enriquece los 'pendiente' por lotes y sube cada lote a la nube.
 
+    `muestra` acota el total a procesar en ESTA corrida (pequeñas muestras
+    para avanzar mientras el fondo completo va por su cuenta); None = todo.
     Devuelve el resumen de la fase. El bucle termina cuando no quedan
     'pendiente' (queda 'sin_dtm'/'listo'); se corta con Ctrl+C sin perder
     nada (cada sitio ya procesado está guardado en la DB).
     """
     _aviso("\n=== FASE 3 · ENRIQUECIMIENTO MARTE (DTM remoto + THEMIS) ===")
-    resumen_fase: dict[str, Any] = {"lotes": [], "subidos_nube": 0}
+    resumen_fase: dict[str, Any] = {"lotes": [], "subidos_nube": 0,
+                                    "procesados_corrida": 0}
     pasada = 0
 
     while True:
@@ -110,11 +114,22 @@ def fase_marte(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
         pendientes = estado["por_estado"].get("pendiente", 0)
         if pendientes == 0:
             break
+        if muestra and resumen_fase["procesados_corrida"] >= muestra:
+            _aviso(f"-- muestra agotada ({muestra} sitios en esta corrida): "
+                   f"quedan {pendientes} para el fondo completo --")
+            break
         pasada += 1
         _aviso(f"-- pasada {pasada}: {pendientes} sitios pendientes --")
 
-        cont = db_sitios_marte.enriquecer(max_sitios=lote, hilos=hilos,
-                                          aviso=_aviso)
+        objetivo_lote = lote
+        if muestra:  # no pasar del tope de la muestra en el último lote
+            objetivo_lote = min(lote, muestra
+                                - resumen_fase["procesados_corrida"])
+        cont = db_sitios_marte.enriquecer(max_sitios=objetivo_lote,
+                                          hilos=hilos, aviso=_aviso)
+        procesados_lote = (cont.get("listo", 0) + cont.get("sin_dtm", 0)
+                           + cont.get("error", 0))
+        resumen_fase["procesados_corrida"] += procesados_lote
         resumen_fase["lotes"].append(cont)
 
         # Subida incremental a la nube (upsert resumible): lo 'listo' del
@@ -141,7 +156,8 @@ def fase_marte(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
 
 
 def fase_reintento(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
-                   sube_a_nube: bool = True) -> dict[str, Any]:
+                   sube_a_nube: bool = True,
+                   muestra: int | None = None) -> dict[str, Any]:
     """Los 'error' (fallos de red puntuales) de MARTE vuelven a 'pendiente'
     y otra pasada. Los 'sin_dtm' NO se reintentan: no hay tile que cubra."""
     con = db_sitios_marte._conectar()
@@ -153,7 +169,8 @@ def fase_reintento(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
     if cur.rowcount:
         _aviso(f"\n=== FASE 5 · REINTENTO (marte): {cur.rowcount} 'error' "
                "-> 'pendiente' ===")
-        return fase_marte(hilos=hilos, lote=lote, sube_a_nube=sube_a_nube)
+        return fase_marte(hilos=hilos, lote=lote, sube_a_nube=sube_a_nube,
+                          muestra=muestra)
     _aviso("\n=== FASE 5 · REINTENTO (marte): sin sitios 'error' ===")
     return {"reintentados": 0}
 
@@ -176,21 +193,35 @@ def fase_gazetteer_luna() -> dict[str, Any]:
 
 
 def fase_luna(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
-              sube_a_nube: bool = True) -> dict[str, Any]:
+              sube_a_nube: bool = True,
+              muestra: int | None = None) -> dict[str, Any]:
     """Enriquece los 'pendiente' LUNARES por lotes (DTM Kaguya) y sube
-    cada lote a la nube. MISMO bucle que la fase marte, otra DB."""
+    cada lote a la nube. MISMO bucle que la fase marte, otra DB;
+    `muestra` acota el total de esta corrida (ver fase_marte)."""
     from . import db_sitios_luna
 
     _aviso("\n=== FASE 4b · ENRIQUECIMIENTO LUNA (DTM Kaguya) ===")
-    resumen_fase: dict[str, Any] = {"lotes": [], "subidos_nube": 0}
+    resumen_fase: dict[str, Any] = {"lotes": [], "subidos_nube": 0,
+                                    "procesados_corrida": 0}
     while True:
         estado = db_sitios_luna.estado_db()
         pendientes = estado["por_estado"].get("pendiente", 0)
         if pendientes == 0:
             break
+        if muestra and resumen_fase["procesados_corrida"] >= muestra:
+            _aviso(f"-- muestra agotada ({muestra} sitios en esta corrida): "
+                   f"quedan {pendientes} para el fondo completo --")
+            break
         _aviso(f"-- {pendientes} sitios lunares pendientes --")
-        cont = db_sitios_luna.enriquecer(max_sitios=lote, hilos=hilos,
-                                         aviso=_aviso)
+        objetivo_lote = lote
+        if muestra:  # no pasar del tope de la muestra en el último lote
+            objetivo_lote = min(lote, muestra
+                                - resumen_fase["procesados_corrida"])
+        cont = db_sitios_luna.enriquecer(max_sitios=objetivo_lote,
+                                         hilos=hilos, aviso=_aviso)
+        procesados_lote = (cont.get("listo", 0) + cont.get("sin_dtm", 0)
+                           + cont.get("error", 0))
+        resumen_fase["procesados_corrida"] += procesados_lote
         resumen_fase["lotes"].append(cont)
         if sube_a_nube and cont.get("listo", 0) > 0:
             subida = poblador_supabase.poblar(aviso=_aviso)
@@ -211,7 +242,8 @@ def fase_luna(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
 
 
 def fase_reintento_luna(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
-                        sube_a_nube: bool = True) -> dict[str, Any]:
+                        sube_a_nube: bool = True,
+                        muestra: int | None = None) -> dict[str, Any]:
     """Los 'error' LUNARES vuelven a 'pendiente' y otra pasada."""
     from . import db_sitios_luna
 
@@ -224,13 +256,27 @@ def fase_reintento_luna(hilos: int = HILOS, lote: int = LOTE_ENRIQUECER,
     if cur.rowcount:
         _aviso(f"\n=== FASE 5 · REINTENTO (luna): {cur.rowcount} 'error' "
                "-> 'pendiente' ===")
-        return fase_luna(hilos=hilos, lote=lote, sube_a_nube=sube_a_nube)
+        return fase_luna(hilos=hilos, lote=lote, sube_a_nube=sube_a_nube,
+                         muestra=muestra)
     _aviso("\n=== FASE 5 · REINTENTO (luna): sin sitios 'error' ===")
     return {"reintentados": 0}
 
 
 def main() -> None:
     import argparse
+    import sys
+
+    # Consola Windows: los nombres del Gazetteer llevan diacríticos
+    # (p.ej. 'Běla'); sin esto, cp1252 rompe el print. (Equivalente a
+    # PYTHONIOENCODING=utf-8 pero sin depender del entorno.)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    def _aviso(msg: str) -> None:
+        print(msg, flush=True)
 
     ap = argparse.ArgumentParser(
         description="Carga COMPLETA de sitios (tierra+luna+marte) en "
@@ -242,6 +288,10 @@ def main() -> None:
     ap.add_argument("--lote", type=int, default=LOTE_ENRIQUECER,
                     help=f"sitios por pasada de enriquecimiento "
                          f"(default {LOTE_ENRIQUECER})")
+    ap.add_argument("--muestra", type=int, default=None,
+                    help="TOPE de sitios por cuerpo en esta corrida "
+                         "(muestras pequeñas para avanzar; sin ella "
+                         "procesa TODO lo pendiente)")
     ap.add_argument("--refrescar_tierra", action="store_true",
                     help="recarga los análogos de tierra aunque ya estén")
     ap.add_argument("--saltear_tierra", action="store_true",
@@ -267,13 +317,16 @@ def main() -> None:
             fase_tierra(refrescar=a.refrescar_tierra)
         if not a.saltear_marte:
             fase_gazetteer()
-            fase_marte(hilos=a.hilos, lote=a.lote, sube_a_nube=sube)
-            fase_reintento(hilos=a.hilos, lote=a.lote, sube_a_nube=sube)
+            fase_marte(hilos=a.hilos, lote=a.lote, sube_a_nube=sube,
+                       muestra=a.muestra)
+            fase_reintento(hilos=a.hilos, lote=a.lote, sube_a_nube=sube,
+                           muestra=a.muestra)
         if not a.saltear_luna:
             fase_gazetteer_luna()
-            fase_luna(hilos=a.hilos, lote=a.lote, sube_a_nube=sube)
+            fase_luna(hilos=a.hilos, lote=a.lote, sube_a_nube=sube,
+                      muestra=a.muestra)
             fase_reintento_luna(hilos=a.hilos, lote=a.lote,
-                                sube_a_nube=sube)
+                                sube_a_nube=sube, muestra=a.muestra)
     except KeyboardInterrupt:
         _aviso("\nINTERRUMPIDO por el usuario — todo lo procesado ya está "
                "guardado (DB local resumible + upsert en la nube). "

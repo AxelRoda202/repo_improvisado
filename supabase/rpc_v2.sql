@@ -158,7 +158,7 @@ begin
     end if;
 
     select count(*) into n_vistos
-        from sitios_candidatos where cuerpo = cuerpo_n;
+        from sitios_candidatos s where s.cuerpo = cuerpo_n;
 
     select coalesce(jsonb_agg(
                jsonb_build_object(
