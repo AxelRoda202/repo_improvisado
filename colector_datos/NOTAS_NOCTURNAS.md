@@ -947,3 +947,29 @@ de similitud ponderada (K-NN) en Supabase.
   (Diviner frío ~1-2 min/sitio; daría térmico + LOLA a shackleton,
   malapert y peary).
 - Push: 403 con la credencial de este dispositivo (§11); Axel empuja.
+
+### 23.6 `carga_fondo.py` — orquestador para llenar TODO (día siguiente)
+
+Pedimento: "dejar en segundo plano cargando todos los lugares de tierra y
+marte". Nace `colector_datos/carga_fondo.py`: 1 comando reanudable
+(Ctrl+C no pierde nada) que encadena las fases reutilizadas, sin
+reescribirlas:
+
+  1. TIERRA   `cargador_sitios.cargar('tierra')` (salta lo ya cargado).
+  2. GAZETTEER `db_sitios_marte.indexar_gazetteer()` SOLO si la DB está
+     vacía. Medido: 2.100 lugares parseados en 3.7 s -> 1.133 útiles
+     (840 cráteres filtrados por diámetro, 127 albedo excluidos).
+  3. MARTE    bucle `enriquecer(--lote)` hasta agotar 'pendiente'; tras
+     CADA lote, `poblar()` sube lo nuevo a Supabase (upsert: la nube
+     crece mientras el fondo trabaja). Ritmo medido: 0.5 s/sitio donde
+     no hay tile, ~8 s/sitio con DTM+THEMIS -> 1.133 sitios ≈ 1-2 h.
+  4. REINTENTO una pasada extra para los 'error' (red); 'sin_dtm' queda
+     como está (honesto: no hay tile).
+  5. CIERRE   poblar final + estado.
+
+Flags: `--hilos` (default 3), `--lote` (default 50), `--saltear_tierra`,
+`--saltear_marte`, `--sin_nube`, `--refrescar_tierra`.
+Smoke real: `--lote 2 --hilos 2` -> gazetteer indexado, 3 sitios
+enriquecidos (1 listo, 5 sin_dtm), y subidas a la nube `+20 -> +21`
+CONFIRMA que la service_role key del usuario ya escribe (el 42501 quedó
+resuelto cambiando publishable por secret).
