@@ -1060,3 +1060,26 @@ respetándolo con sectorización por prioridad.
   para la fase lunar (~1 h) — o el comando completo para ambas.
 - Pendiente opcional: polos lunares con térmico real (Diviner vía GDS,
   `cargador_sitios --solo luna --gds --hilos 1`).
+
+## 25. Muestras de tierra completadas + fondo total en marcha
+
+**Pedido:** "subime unas muestras de la tierra, y de ahi dejamos en
+segundo plano todo".
+
+- RPCs v2 verificadas tras el re-paste del usuario: `buscar_analogo_cuerpo`
+  (luna top-2: Purkyně 0.993 / Van Vleck 0.991) y `buscar_analogos_v2`
+  (luna_top1 + marte_top1 Kasabi + tierra_top5) responden sin errores.
+- Catálogo de tierra expandido a 24 análogos (12 nuevos: Uyuni, Dallol,
+  Río Tinto, Wadi Rum, Lonar, Meteor Crater, Kilauea, Shark Bay, Pilbara,
+  Svalbard, Makgadikgadi, Pinacate; constantes.py, commit c99b90b).
+  Carga vía `cargador_sitios --solo tierra`: fríos 50-108 s c/u (GLO-90,
+  tile cacheado) / tibios 3.8-4.9 s.
+- Poblador: 140 filas en la nube (tierra=24 con las 9 métricas, luna=63,
+  marte=53), upsert 5.6 s, sin errores; guardián: base 11.4 MB
+  (0.29 MB la tabla), 2.3% del límite de trabajo de 450 MB.
+- RPC de tierra con perfil de 5 métricas: desglose por categorías llena
+  (Salar Grande 0.937 global, topo=0.94, term=0.89) — los análogos nuevos
+  rankean dentro del Top 5 (Wadi Rum 0.933).
+- Fondo lanzado en segundo plano (sesión del agente): `carga_fondo
+  --saltear_tierra` completo, log en Temp\opencode\carga_fondo.log.
+  Reanudable: si muere, repetir el comando continúa donde quedó.
